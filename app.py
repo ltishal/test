@@ -1,3 +1,9 @@
+# -*- coding: utf-8 -*-
+"""RPG ИИ-Мастер — серверная часть.
+
+Локально:  python app.py
+Railway:   gunicorn app:app -w 1 --threads 8 --timeout 300 --bind 0.0.0.0:$PORT
+"""
 import os
 import re
 import json
@@ -8,49 +14,94 @@ import threading
 from contextlib import contextmanager
 from pathlib import Path
 
-# .env читаем, только если файл есть и установлен python-dotenv.
-# На Railway переменные приходят из панели Variables — пакет там не нужен,
-# и приложение не должно падать из-за его отсутствия.
-try:
-    from dotenv import load_dotenv
-    load_dotenv(Path(__file__).with_name(".env"))
-except ImportError:
-    pass
-
-from flask import (Flask, request, jsonify, Response, render_template,
-                   send_from_directory)
+from flask import Flask, request, jsonify, Response, render_template
 from openai import OpenAI
+
+BASE_DIR = Path(__file__).resolve().parent
+
+
+# ─── Конфигурация ─────────────────────────────────────────────────────────
+# .env нужен только локально. На Railway переменные задаются в панели проекта,
+# файла на диске нет — и это нормально, приложение не должно падать.
+def _load_env():
+    try:
+        from dotenv import load_dotenv
+    except ImportError:
+        print("[boot] python-dotenv не установлен — читаю только окружение", flush=True)
+        return None
+    for name in (".env", "_.env", "env", "env.txt"):
+        path = BASE_DIR / name
+        if path.is_file():
+            load_dotenv(path, override=False)
+            return path
+    load_dotenv(override=False)
+    return None
+
+
+_ENV_FILE = _load_env()
 
 app = Flask(__name__)
 
-MODEL = os.getenv("OPENAI_MODEL", "qwen2.5:7b")
-BASE_URL = os.getenv("OPENAI_BASE_URL") or None
-API_KEY = os.getenv("OPENAI_API_KEY")
+MODEL = (os.getenv("OPENAI_MODEL") or "gpt-4o-mini").strip()
+BASE_URL = (os.getenv("OPENAI_BASE_URL") or "").strip() or None
+API_KEY = (os.getenv("OPENAI_API_KEY") or "").strip()
 if not API_KEY and BASE_URL:
     API_KEY = "ollama"
 if not API_KEY:
-    raise SystemExit("Не задан OPENAI_API_KEY.")
+    raise SystemExit(
+        "Не задан OPENAI_API_KEY.\n"
+        "Railway → ваш проект → Variables → New Variable: OPENAI_API_KEY\n"
+        "Локально → скопируйте .env.example в .env и впишите ключ."
+    )
 
-if BASE_URL:
-    client = OpenAI(api_key=API_KEY, base_url=BASE_URL)
-else:
-    client = OpenAI(api_key=API_KEY)
+LLM_TIMEOUT = float(os.getenv("LLM_TIMEOUT", "300"))
+client = OpenAI(api_key=API_KEY, base_url=BASE_URL, timeout=LLM_TIMEOUT, max_retries=1)
 
-# Служебные вызовы (извлечение состояния, резюме) можно увести на модель полегче.
-# Пусто → используется MODEL.
-EXTRACT_MODEL = os.getenv("EXTRACT_MODEL") or MODEL
-SUMMARY_MODEL = os.getenv("SUMMARY_MODEL") or MODEL
+# Служебные вызовы (извлечение состояния, резюме) идут КАЖДЫЙ ход.
+# Их обязательно уводить на дешёвую/быструю модель.
+EXTRACT_MODEL = (os.getenv("EXTRACT_MODEL") or "").strip() or MODEL
+SUMMARY_MODEL = (os.getenv("SUMMARY_MODEL") or "").strip() or MODEL
 
-BASE_DIR = Path(__file__).resolve().parent
-SAVES_DIR = BASE_DIR / "saves"
-SAVES_DIR.mkdir(exist_ok=True)
+print(
+    f"[boot] env={_ENV_FILE.name if _ENV_FILE else 'нет (только переменные окружения)'} | "
+    f"model={MODEL} | base_url={BASE_URL or 'https://api.openai.com/v1'} | "
+    f"key={API_KEY[:4]}… | timeout={LLM_TIMEOUT:g}s",
+    flush=True,
+)
+if BASE_URL and ("127.0.0.1" in BASE_URL or "localhost" in BASE_URL):
+    print(
+        "[boot] ВНИМАНИЕ: base_url указывает на localhost. Это работает только если "
+        "Ollama запущена на ТОЙ ЖЕ машине, что и этот процесс. На Railway так нельзя.",
+        flush=True,
+    )
+
+
+def _saves_dir():
+    """Папка сохранений. На Railway монтируйте Volume и задайте SAVES_DIR=/data."""
+    raw = (os.getenv("SAVES_DIR") or "").strip()
+    path = Path(raw) if raw else (BASE_DIR / "saves")
+    try:
+        path.mkdir(parents=True, exist_ok=True)
+        probe = path / ".write-test"
+        probe.write_text("ok", encoding="utf-8")
+        probe.unlink()
+    except OSError as exc:
+        print(
+            f"[boot] ВНИМАНИЕ: {path} недоступен для записи ({exc}). "
+            "Сохранения работать не будут — подключите Volume и задайте SAVES_DIR.",
+            flush=True,
+        )
+    return path
+
+
+SAVES_DIR = _saves_dir()
 
 FREQ_PENALTY = float(os.getenv("OPENAI_FREQ_PENALTY", "0.35"))
 PRES_PENALTY = float(os.getenv("OPENAI_PRES_PENALTY", "0.25"))
 
-# ─── Лимит параллельных обращений к модели ─────────────────────────────────
-# Главное узкое место при нескольких игроках. Ставьте ровно столько, сколько
-# выдерживает ваш бэкенд (для Ollama — OLLAMA_NUM_PARALLEL).
+# ─── Лимит параллельных обращений к модели ────────────────────────────────
+# Живёт в памяти процесса: держите РОВНО ОДИН воркер gunicorn,
+# иначе лимит умножится на число воркеров.
 LLM_MAX_CONCURRENT = max(1, int(os.getenv("LLM_MAX_CONCURRENT", "2")))
 LLM_QUEUE_TIMEOUT = float(os.getenv("LLM_QUEUE_TIMEOUT", "120"))
 LLM_SEM = threading.BoundedSemaphore(LLM_MAX_CONCURRENT)
@@ -69,6 +120,60 @@ def llm_slot(timeout=None):
     finally:
         if ok:
             LLM_SEM.release()
+
+
+PENALTY_REJECT = (
+    "frequency_penalty", "presence_penalty", "unrecognized", "unsupported",
+    "unknown field", "unknown parameter", "extra fields", "additional properties",
+    "unexpected keyword", "not permitted", "invalid_request",
+)
+
+
+def _short_error(exc):
+    """Короткий, но конкретный текст ошибки провайдера."""
+    text = " ".join(str(exc).split())[:400]
+    status = getattr(exc, "status_code", None)
+    body = getattr(exc, "body", None)
+    if body:
+        try:
+            text += " " + json.dumps(body, ensure_ascii=False)[:300]
+        except (TypeError, ValueError):
+            pass
+    return f"{type(exc).__name__}{' ' + str(status) if status else ''}: {text}"
+
+
+def _error_hint(exc):
+    """Что игроку делать с этой ошибкой. Пустая строка — подсказки нет."""
+    low = str(exc).lower()
+    status = getattr(exc, "status_code", None)
+    if status == 401 or "unauthorized" in low or "invalid api key" in low:
+        return "Ключ не принят. Проверьте OPENAI_API_KEY в Variables."
+    if status == 402 or "insufficient" in low or "credit" in low or "quota" in low:
+        return "У провайдера закончились средства. Пополните счёт или смените модель."
+    if status == 429 or "rate limit" in low:
+        return "Провайдер ограничивает частоту. Подождите минуту или смените модель."
+    if status == 404 or ("model" in low and "not found" in low):
+        return "Модель не найдена. Проверьте OPENAI_MODEL — список виден в /api/diag."
+    if ("connection" in low or "refused" in low or "timed out" in low
+            or "name or service" in low):
+        return ("Нет связи с моделью. Проверьте OPENAI_BASE_URL: на Railway "
+                "адрес 127.0.0.1 указывает на сам контейнер, где Ollama нет.")
+    if "context" in low and ("length" in low or "token" in low):
+        return "Слишком длинный контекст. Начните новую партию или уменьшите историю."
+    return ""
+
+
+def _start_stream(messages):
+    """Стрим мастера. Если провайдер не принимает штрафы — повтор без них."""
+    base = dict(model=MODEL, messages=messages, temperature=0.9, stream=True)
+    try:
+        return client.chat.completions.create(
+            **base, frequency_penalty=FREQ_PENALTY, presence_penalty=PRES_PENALTY)
+    except Exception as exc:
+        if not any(h in str(exc).lower() for h in PENALTY_REJECT):
+            raise
+        app.logger.warning("Провайдер отклонил штрафы, повтор без них: %s", _short_error(exc))
+        return client.chat.completions.create(**base)
 
 
 def _header_token(name, limit):
@@ -595,7 +700,6 @@ def normalize_quest(q):
 
 def normalize_note(n):
     if isinstance(n, dict):
-        # Проверка минимальных полей
         if "id" not in n:
             n["id"] = "n" + str(random.randint(1000, 9999))
         if "type" not in n:
@@ -689,7 +793,8 @@ def extract_state(messages, current_state):
                 temperature=0.1,
             )
         new_state = clean_json(resp.choices[0].message.content or "")
-    except Exception:
+    except Exception as exc:
+        app.logger.warning("Извлечение состояния не удалось: %s", _short_error(exc))
         new_state = {}
 
     merged = dict(current)
@@ -791,27 +896,6 @@ def _save_info(name, path):
         return {"name": name, "saved_at": 0, "size": 0}
 
 
-# ─── Поиск главной страницы ────────────────────────────────────────────────
-def _find_index():
-    """Ищет index.html в нескольких местах.
-
-    Flask по умолчанию смотрит только в templates/ рядом с app.py.
-    Если файл оказался в корне или сборка идёт из другой папки — ищем шире.
-    """
-    candidates = [
-        BASE_DIR / "templates" / "index.html",
-        BASE_DIR / "index.html",
-        BASE_DIR / "static" / "index.html",
-        BASE_DIR / "public" / "index.html",
-        Path.cwd() / "templates" / "index.html",
-        Path.cwd() / "index.html",
-    ]
-    for p in candidates:
-        if p.is_file():
-            return p
-    return None
-
-
 @app.route("/api/health")
 def api_health():
     return jsonify({
@@ -822,54 +906,55 @@ def api_health():
         "base_url_configured": bool(BASE_URL),
         "llm_max_concurrent": LLM_MAX_CONCURRENT,
         "llm_queue_timeout": LLM_QUEUE_TIMEOUT,
+        "llm_timeout": LLM_TIMEOUT,
         "saves_dir": str(SAVES_DIR),
         "sessions_cached": len(_SUMMARY_STATE),
-        "index_found": str(_find_index() or ""),
     })
 
 
-@app.route("/api/debug/files")
-def api_debug_files():
-    """Список файлов рядом с приложением.
-
-    Помогает понять, что реально доехало в контейнер, если шаблон не находится.
-    """
-    tree = {}
-    for root, dirs, files in os.walk(BASE_DIR):
-        dirs[:] = [d for d in dirs
-                   if d not in (".venv", "venv", "__pycache__", ".git", "node_modules")]
-        rel = os.path.relpath(root, BASE_DIR)
-        if files:
-            tree[rel] = sorted(files)
-    found = _find_index()
-    return jsonify({
-        "base_dir": str(BASE_DIR),
-        "cwd": os.getcwd(),
-        "index_found": str(found) if found else None,
-        "files": tree,
-    })
+@app.route("/api/diag")
+def api_diag():
+    """Диагностика: что настроено и что реально отвечает провайдер."""
+    result = {
+        "model": MODEL,
+        "extract_model": EXTRACT_MODEL,
+        "summary_model": SUMMARY_MODEL,
+        "base_url": BASE_URL or "https://api.openai.com/v1",
+        "key_set": bool(API_KEY),
+        "env_file": _ENV_FILE.name if _ENV_FILE else None,
+        "llm_timeout": LLM_TIMEOUT,
+        "saves_dir": str(SAVES_DIR),
+    }
+    if BASE_URL and ("127.0.0.1" in BASE_URL or "localhost" in BASE_URL):
+        result["hint"] = ("base_url указывает на localhost — Ollama видна только с той же "
+                          "машины. На Railway так не работает: нужен облачный провайдер "
+                          "(например https://openrouter.ai/api/v1).")
+    try:
+        result["models"] = [m.id for m in client.models.list().data][:60]
+        result["model_present"] = MODEL in result["models"]
+    except Exception as exc:
+        result["models_error"] = _short_error(exc)
+    try:
+        with llm_slot(20) as ok:
+            if not ok:
+                raise RuntimeError("нет свободного слота модели")
+            resp = client.chat.completions.create(
+                model=MODEL, temperature=0, max_tokens=8,
+                messages=[{"role": "user", "content": "Ответь одним словом: ок"}])
+        result["ping_ok"] = True
+        result["ping"] = (resp.choices[0].message.content or "").strip()
+    except Exception as exc:
+        result["ping_ok"] = False
+        result["ping_error"] = _short_error(exc)
+        hint = _error_hint(exc)
+        if hint:
+            result["ping_hint"] = hint
+    return jsonify(result)
 
 
 @app.route("/")
 def index():
-    path = _find_index()
-    if path is None:
-        return (
-            "<!DOCTYPE html><html lang='ru'><head><meta charset='utf-8'>"
-            "<title>index.html не найден</title></head>"
-            "<body style='font-family:sans-serif;max-width:640px;margin:60px auto;"
-            "line-height:1.6;color:#333'>"
-            "<h1>index.html не найден</h1>"
-            "<p>Приложение работает, но не видит файл главной страницы. "
-            "Откройте <a href='/api/debug/files'><code>/api/debug/files</code></a> — "
-            "там список файлов, которые доехали в контейнер.</p>"
-            "<p>Проверьте: файл должен лежать в папке <code>templates</code> "
-            "рядом с <code>app.py</code> и называться ровно "
-            "<code>index.html</code> (строчными буквами).</p>"
-            "</body></html>",
-            500,
-        )
-    return send_from_directory(path.parent, path.name)
+    return render_template("index.html")
 
 
 @app.route("/api/roll", methods=["POST"])
@@ -897,27 +982,17 @@ def api_chat():
 
     def generate():
         if not LLM_SEM.acquire(timeout=LLM_QUEUE_TIMEOUT):
-            # Префикс «[Ошибка API:» клиент распознаёт и не пишет это в историю игры.
-            yield "\n[Ошибка API: сервер занят — все слоты модели заняты. Подождите минуту и повторите.]"
+            yield ("\n[Ошибка API: сервер занят — все слоты модели заняты. "
+                   "Подождите минуту и повторите.]")
             return
         try:
             try:
-                stream = client.chat.completions.create(
-                    model=MODEL, messages=messages,
-                    temperature=0.9,
-                    frequency_penalty=FREQ_PENALTY,
-                    presence_penalty=PRES_PENALTY,
-                    stream=True,
-                )
-            except Exception as inner:
-                msg = str(inner).lower()
-                if "frequency_penalty" in msg or "presence_penalty" in msg or "unknown" in msg:
-                    stream = client.chat.completions.create(
-                        model=MODEL, messages=messages,
-                        temperature=0.9, stream=True,
-                    )
-                else:
-                    raise
+                stream = _start_stream(messages)
+            except Exception as e:
+                app.logger.exception("Модель недоступна")
+                hint = _error_hint(e)
+                yield f"\n[Ошибка API: {_short_error(e)}" + (f" {hint}" if hint else "") + "]"
+                return
             for chunk in stream:
                 if not chunk.choices:
                     continue
@@ -926,11 +1001,17 @@ def api_chat():
                 if text:
                     yield text
         except Exception as e:
-            yield "\n[Ошибка API: запрос к модели не выполнен. Проверь настройки модели/API и попробуй снова.]"
+            app.logger.exception("Стрим прервался")
+            hint = _error_hint(e)
+            yield f"\n[Ошибка API: {_short_error(e)}" + (f" {hint}" if hint else "") + "]"
         finally:
             LLM_SEM.release()
 
-    return Response(generate(), mimetype="text/plain; charset=utf-8")
+    return Response(
+        generate(),
+        mimetype="text/plain; charset=utf-8",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
 
 
 @app.route("/api/state", methods=["POST"])
