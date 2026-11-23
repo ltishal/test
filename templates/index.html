@@ -36,15 +36,38 @@
   }
   .status-row { display: flex; align-items: center; gap: 10px; }
   .status-top { display: flex; align-items: center; gap: 12px; }
-  .identity {
-    flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 3px;
-    padding-left: 12px; border-left: 3px solid var(--accent-gold);
+  /* Pure emoji insignia: no image fetches or image-generation services. */
+  .identity-crest {
+    width: 50px; height: 50px; border-radius: 15px;
+    border: 2px solid var(--accent-gold); background: #342a20;
+    flex-shrink: 0; display: flex; align-items: center; justify-content: center;
+    font-size: 27px; cursor: pointer;
   }
-  .identity-name {
-    font-weight: 700; color: var(--accent-gold); font-family: var(--font-serif);
-    font-size: 19px; line-height: 1.2; word-break: break-word;
+  .identity-crest:focus-visible, .creator-option:focus-visible { outline: 2px solid var(--accent-gold); outline-offset: 3px; }
+  .identity-tags { display:flex; flex-wrap:wrap; gap:5px; margin-top:2px; }
+  .identity-tag {
+    display:inline-flex; gap:5px; align-items:center; padding:3px 8px;
+    background:#302820; border:1px solid #554333; border-radius:20px;
+    font-size:11px; color:var(--text-primary); max-width:100%;
   }
-  .identity-sub { font-size: 12px; color: var(--text-secondary); }
+  .identity-tag .symbol { font-size:15px; line-height:1.1; }
+  .identity-hero { display:flex; align-items:center; gap:12px; padding:10px;
+    border:1px solid var(--border-subtle); border-radius:12px; background:var(--bg-card); }
+  .identity-hero-crest { font-size:47px; line-height:1.15; }
+  .creator-group { display:flex; flex-direction:column; gap:8px; }
+  .creator-heading { font-size:13px; color:var(--accent-gold); font-weight:700; }
+  .creator-options { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:6px; }
+  .creator-option { display:flex; flex-direction:column; align-items:center; gap:3px;
+    padding:8px 3px; min-height:61px; border:1px solid var(--border-subtle);
+    border-radius:9px; background:var(--bg-card); color:var(--text-primary);
+    cursor:pointer; font:inherit; font-size:11px; overflow-wrap:anywhere; }
+  .creator-option .symbol { font-size:25px; line-height:1.3; }
+  .creator-option.selected { border-color:var(--accent-gold); background:#3d301c; }
+  .creator-preview { display:flex; flex-wrap:wrap; gap:6px; margin-top:4px; }
+  .creator-hint { font-size:12px; color:var(--text-secondary); }
+  .status-info { flex: 1; display: flex; flex-direction: column; gap: 4px; }
+  .status-name { font-weight: 700; color: var(--accent-gold); font-family: var(--font-serif); font-size: 15px; }
+  .status-sub { font-size: 11px; color: var(--text-secondary); margin-top: -2px; }
   .status-chips { display: flex; gap: 6px; flex-wrap: wrap; }
   .status-chip {
     background: var(--bg-card); padding: 2px 8px; border-radius: 6px;
@@ -106,6 +129,23 @@
     font-size: 14px; border-radius: 10px;
   }
   .msg.dice b { color: var(--accent-gold); }
+  .msg.dice .dice-label { font-size: 11px; text-transform: uppercase; letter-spacing: 0.1em; color: var(--text-secondary); margin-bottom: 5px; }
+  .msg.dice .dice-total { font-size: 21px; font-weight: 700; color: var(--accent-gold); }
+  .msg.dice .dice-details { font-size: 12px; margin-top: 4px; color: #d5bea8; overflow-wrap: anywhere; }
+  .msg.character-sheet {
+    align-self: flex-start; max-width: min(100%, 560px); width: 100%; white-space: normal;
+    background: linear-gradient(135deg, #30271c, #201c19); border: 1px solid #71582c;
+    padding: 14px; color: var(--text-primary);
+  }
+  .character-sheet .sheet-heading { font: bold 17px var(--font-serif); color: var(--accent-gold); margin-bottom: 7px; }
+  .character-sheet .sheet-meta { display: flex; flex-wrap: wrap; gap: 7px; font-size: 12px; color: var(--text-secondary); margin: 8px 0; }
+  .character-sheet .sheet-meta span { padding: 4px 7px; border: 1px solid #554333; border-radius: 7px; }
+  .character-sheet .sheet-stats { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 7px; margin-top: 10px; }
+  .character-sheet .sheet-stat { min-width: 0; border-radius: 8px; background: #1b1917; border: 1px solid #4c3b2a; padding: 8px 4px; text-align: center; }
+  .character-sheet .sheet-stat-name { font-size: 11px; color: var(--text-secondary); }
+  .character-sheet .sheet-stat-value { font-size: 19px; font-weight: 700; }
+  .character-sheet .sheet-stat-mod { color: var(--accent-gold); font-size: 12px; }
+  .character-sheet .sheet-footer { font-size: 12px; color: var(--text-secondary); margin-top: 10px; }
   .msg.dice .dice-emoji {
     display: inline-block; font-size: 20px; vertical-align: middle;
     animation: diceShake 0.35s ease-in-out infinite;
@@ -274,45 +314,25 @@
     padding: 3px 8px; font-size: 11px; cursor: pointer;
   }
   .note-action-btn:active { background: var(--bg-deep); }
-  /* Сохранения */
-  .save-row {
-    display: flex; align-items: center; gap: 8px;
-    padding: 10px 12px; background: var(--bg-card);
-    border: 1px solid var(--border-subtle); border-radius: 8px;
-  }
-  .save-row .save-col { flex: 1; min-width: 0; }
-  .save-row .save-name {
-    cursor: pointer; font-size: 14px; color: var(--text-primary);
-    word-break: break-all;
-  }
-  .save-row .save-name:hover { color: var(--accent-gold); }
-  .save-row .save-meta { font-size: 11px; color: var(--text-secondary); margin-top: 2px; }
-  .save-row .note-action-btn { flex-shrink: 0; }
-  .save-note {
-    font-size: 12px; color: var(--accent-gold);
-    background: var(--bg-deep); border: 1px solid var(--border-subtle);
-    border-radius: 6px; padding: 6px 10px;
-  }
-  /* Перенос партии */
+  /* Перенос партии между устройствами */
   .transfer-area {
-    width: 100%; height: 150px; background: var(--bg-deep);
-    color: var(--text-primary); border: 1px solid var(--border-subtle);
-    border-radius: 8px; padding: 10px; font: 12px monospace;
-    resize: vertical; outline: none;
+    width: 100%; min-height: 150px; max-height: 42vh; resize: vertical;
+    background: var(--bg-deep); color: var(--text-primary);
+    border: 1px solid var(--border-subtle); border-radius: 8px;
+    padding: 10px; font: 12px/1.5 monospace; outline: none;
   }
   .transfer-area:focus { border-color: var(--accent-gold); }
-  .transfer-hint { font-size: 12px; color: var(--text-secondary); line-height: 1.5; }
-  .transfer-info { font-size: 11px; color: var(--text-secondary); }
-  .transfer-info.warn { color: #d45a5a; }
-  .transfer-row { display: flex; gap: 6px; }
-  .transfer-row .btn { flex: 1; }
+  .transfer-hint { color: var(--text-secondary); font-size: 12px; line-height: 1.5; }
+  .transfer-info { color: var(--text-secondary); font-size: 11px; margin: 6px 0; }
+  .transfer-info.warn { color: #e57373; }
+  .transfer-row { display: flex; gap: 7px; }
+  .transfer-row .btn { flex: 1; min-width: 0; }
 </style>
 </head>
 <body>
 
 <header>
   <h1>🎲 <span>RPG</span> ИИ-Мастер</h1>
-  <span id="quota-counter" role="status" style="font-size:11px;color:var(--accent-gold);margin-left:auto;margin-right:10px;white-space:nowrap" title="Оставшиеся ходы">Ходы: …</span>
   <button class="icon-btn" id="menu-btn" aria-label="Меню">☰</button>
 </header>
 
@@ -345,6 +365,7 @@
   <div class="drawer-section">
     <button class="btn" data-action="dice">🎲 Бросок 1d20</button>
     <button class="btn" data-action="dice-custom">🎲 Свой бросок...</button>
+    <button class="btn" data-action="create">🧬 Создать персонажа</button>
     <button class="btn" data-action="sheet">📜 Полный лист</button>
     <button class="btn" data-action="skills">🎯 Умения и навыки</button>
     <button class="btn" data-action="notes">📝 Заметки <span class="drawer-badge" id="drawer-notes-badge" style="display:none">0</span></button>
@@ -359,24 +380,26 @@
     <button class="btn" id="tts-voice-btn">🎙 Сменить голос</button>
     <button class="btn" id="tts-stop-btn">⏹ Остановить</button>
   </div>
-  <h2>Доступ</h2>
-  <div class="drawer-section">
-    <button class="btn" data-action="quota">🎫 Лимит и доступ</button>
-  </div>
   <h2>Игра</h2>
   <div class="drawer-section">
     <button class="btn" data-action="save">💾 Сохранить</button>
     <button class="btn" data-action="load">📂 Загрузить</button>
+    <button class="btn" data-action="manage-saves">🗂 Управление сохранениями</button>
     <button class="btn" data-action="transfer">🔄 Перенос партии</button>
     <button class="btn" data-action="reset">✨ Новая игра</button>
     <button class="btn" data-action="help">❓ Справка</button>
+    <button class="btn" data-action="logout">🔒 Сменить пользователя</button>
   </div>
 </aside>
 
 <div id="modal"><div class="modal-content" id="modal-content"></div></div>
 
 <script>
-let messages = [], state = null, busy = false;
+let messages = [], state = null, memory = {}, uiEvents = [], busy = false, rolling = false;
+let authUser = 'owner', authToken = '';
+const AUTH_KEY = 'rpg_session_auth_v2';
+try { sessionStorage.removeItem('rpg_access_v1'); } catch(e) {}
+
 const chatEl = document.getElementById('chat');
 const inputEl = document.getElementById('input');
 const sendBtn = document.getElementById('send-btn');
@@ -386,46 +409,8 @@ const modalEl = document.getElementById('modal');
 const modalContent = document.getElementById('modal-content');
 const statusEl = document.getElementById('status');
 
-const LS_KEY = 'rpg_session_v9';
+const LS_KEY = 'rpg_session_v10';
 const TTS_KEY = 'rpg_tts_v1';
-
-/* ═══════════ ИДЕНТИФИКАТОРЫ ═══════════
-   Browser ID is legacy and no longer grants access to saves or quotas.
-   The server instead issues a signed HttpOnly browser cookie.
-   sessionId scopes the storyline summary; it is not an authentication token. */
-
-const CLIENT_ID = (() => {
-  let id = localStorage.getItem('rpg_client_id');
-  if (!id) {
-    id = 'c' + Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
-    localStorage.setItem('rpg_client_id', id);
-  }
-  return id;
-})();
-
-function newSessionId() {
-  return 's' + Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
-}
-let SESSION_ID = localStorage.getItem('rpg_session_id') || newSessionId();
-localStorage.setItem('rpg_session_id', SESSION_ID);
-function resetSession() {
-  SESSION_ID = newSessionId();
-  localStorage.setItem('rpg_session_id', SESSION_ID);
-}
-
-(function () {
-  const orig = window.fetch.bind(window);
-  window.fetch = function (url, opts) {
-    const u = typeof url === 'string' ? url : (url && url.url) || '';
-    if (u.startsWith('/api/')) {
-      opts = Object.assign({}, opts || {});
-      const h = Object.assign({}, opts.headers || {});
-      h['X-Session-Id'] = SESSION_ID;
-      opts.headers = h;
-    }
-    return orig(url, opts);
-  };
-})();
 
 const EMPTY_STATE = {
   name:"Пустой", race:"", class:"", background:"",
@@ -438,7 +423,7 @@ const EMPTY_STATE = {
   dc_modifier:0, dc_modifier_reasons:[],
   position:"стоит", cover:"нет",
   weapon_in_hand:"", restrained:false,
-  level_history:[], xp_event_ids:[], xp_scored_through:0, level_pending:0
+  level_history:[], xp_event_ids:[], level_pending:0
 };
 
 const NOTE_TYPES = {
@@ -459,10 +444,14 @@ const READY_WORLDS = [
   { id: 'litrpg_apocalypse', name: 'LitRPG: Система', desc: 'Земля после Системы. Монстры, уровни, прокачка.', prompt: 'Мир: LitRPG. Система пришла на Землю. Я — обычный человек с интерфейсом уровня и характеристик. Начни с первой Системы и первого монстра.' }
 ];
 
-function persist() { try { localStorage.setItem(LS_KEY, JSON.stringify({messages, state})); } catch(e){} }
+// Local campaigns are isolated between authenticated users in the same browser.
+function persist() {
+  try { localStorage.setItem(LS_KEY + '_' + authUser, JSON.stringify({messages, state, memory, ui_events: uiEvents})); } catch(e){}
+}
 function restore() {
   try {
-    const r = localStorage.getItem(LS_KEY);
+    const r = localStorage.getItem(LS_KEY + '_' + authUser) ||
+              (authUser === 'owner' ? localStorage.getItem('rpg_session_v9') : null);
     if (!r) return null;
     const d = JSON.parse(r);
     if (d && Array.isArray(d.messages)) return d;
@@ -471,6 +460,158 @@ function restore() {
 }
 function esc(s) {
   return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+}
+
+/* AUTH: Only the opaque, ASCII-safe session token belongs in HTTP headers.
+   The server resolves the account from the session; names (including Cyrillic)
+   must never be sent via X-RPG-User or another HTTP header. */
+function authHeaders() {
+  return {'Authorization': 'Bearer ' + authToken};
+}
+async function checkAuth(token) {
+  try {
+    const response = await fetch('/api/auth/check', {
+      headers: {'Authorization': 'Bearer ' + token},
+      cache: 'no-store'
+    });
+    if (!response.ok) return null;
+    const data = await response.json();
+    return data.user || null;
+  } catch (e) { return null; }
+}
+async function showLogin() {
+  let config = {registration_enabled: true, invite_required: false};
+  try {
+    const r = await fetch('/api/auth/config', {cache: 'no-store'});
+    if (r.ok) config = await r.json();
+  } catch (e) { /* Server/network failure will surface on submission. */ }
+  const registrationTab = config.registration_enabled
+    ? '<button class="btn" id="auth-register-mode" type="button">Зарегистрироваться</button>'
+    : '';
+  const inviteField = config.invite_required
+    ? `<div id="invite-group" style="display:none"><label for="auth-invite">Код приглашения</label>
+       <input id="auth-invite" type="password" autocomplete="off" maxlength="128"></div>`
+    : '';
+  modalContent.innerHTML = `<h3>🎲 RPG-мастер</h3>
+    <p style="color:var(--text-secondary)">Войдите в свой аккаунт или создайте новый. У каждого игрока будут свои сохранения.</p>
+    <div style="display:flex;gap:8px;flex-wrap:wrap">
+      <button class="btn primary" id="auth-login-mode" type="button">Войти</button>
+      ${registrationTab}
+    </div>
+    <label for="auth-username">Логин</label>
+    <input id="auth-username" type="text" autocomplete="username" placeholder="Например, ivan" maxlength="32">
+    <label for="auth-password">Пароль</label>
+    <input id="auth-password" type="password" autocomplete="current-password" maxlength="128">
+    <div id="auth-confirm-group" style="display:none">
+      <label for="auth-confirm">Повторите пароль</label>
+      <input id="auth-confirm" type="password" autocomplete="new-password" maxlength="128">
+    </div>
+    ${inviteField}
+    <p id="auth-hint" style="font-size:12px;color:var(--text-secondary)">Для владельца: логин owner и ключ RPG_ACCESS_TOKEN.</p>
+    <div id="auth-error" role="alert" style="color:#e57373;min-height:20px;font-size:13px"></div>
+    <button class="btn primary" id="auth-submit" type="button" style="width:100%">Войти</button>`;
+  modalEl.classList.add('open');
+  return new Promise(resolve => {
+    const userBox = document.getElementById('auth-username');
+    const passBox = document.getElementById('auth-password');
+    const confirmBox = document.getElementById('auth-confirm');
+    const confirmGroup = document.getElementById('auth-confirm-group');
+    const inviteGroup = document.getElementById('invite-group');
+    const hint = document.getElementById('auth-hint');
+    const error = document.getElementById('auth-error');
+    const button = document.getElementById('auth-submit');
+    const loginTab = document.getElementById('auth-login-mode');
+    const registerTab = document.getElementById('auth-register-mode');
+    let mode = 'login';
+    function setMode(next) {
+      mode = next;
+      const isRegister = mode === 'register';
+      confirmGroup.style.display = isRegister ? '' : 'none';
+      if (inviteGroup) inviteGroup.style.display = isRegister ? '' : 'none';
+      passBox.autocomplete = isRegister ? 'new-password' : 'current-password';
+      button.textContent = isRegister ? 'Создать аккаунт' : 'Войти';
+      hint.textContent = isRegister
+        ? 'Логин: 3–32 символа (буквы, цифры, _ или -). Пароль: минимум 8 символов.'
+        : 'Для владельца: логин owner и ключ RPG_ACCESS_TOKEN.';
+      loginTab.classList.toggle('primary', !isRegister);
+      if (registerTab) registerTab.classList.toggle('primary', isRegister);
+      error.textContent = '';
+    }
+    loginTab.onclick = () => setMode('login');
+    if (registerTab) registerTab.onclick = () => setMode('register');
+    async function submit() {
+      const username = userBox.value.trim(), password = passBox.value;
+      if (!username || !password) { error.textContent = 'Введите логин и пароль.'; return; }
+      if (mode === 'register' && password !== confirmBox.value) {
+        error.textContent = 'Пароли не совпадают.'; return;
+      }
+      button.disabled = true;
+      error.textContent = mode === 'register' ? 'Создаём аккаунт…' : 'Проверяем пароль…';
+      try {
+        const endpoint = mode === 'register' ? '/api/auth/register' : '/api/auth/login';
+        const payload = {username, password};
+        if (inviteGroup) payload.invite_code = document.getElementById('auth-invite').value;
+        const response = await fetch(endpoint, {
+          method: 'POST', headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify(payload), cache: 'no-store'
+        });
+        const result = await response.json();
+        if (!response.ok || !result.ok || !result.token) {
+          error.textContent = result.error || 'Не удалось войти. Повторите попытку.';
+          return;
+        }
+        authUser = result.user;
+        authToken = result.token;
+        try { sessionStorage.setItem(AUTH_KEY, JSON.stringify({user: authUser, token: authToken})); } catch(e) {}
+        modalEl.classList.remove('open');
+        resolve(true);
+      } catch(e) {
+        error.textContent = 'Нет соединения с сервером. Попробуйте ещё раз.';
+      } finally { button.disabled = false; }
+    }
+    button.onclick = submit;
+    [userBox, passBox, confirmBox].forEach(el => {
+      el.onkeydown = e => { if (e.key === 'Enter') submit(); };
+    });
+    userBox.focus();
+  });
+}
+async function ensureAuth() {
+  let saved;
+  try { saved = JSON.parse(sessionStorage.getItem(AUTH_KEY) || 'null'); } catch(e) {}
+  if (saved && saved.user && typeof saved.token === 'string') {
+    const user = await checkAuth(saved.token);
+    if (user) { authUser = user; authToken = saved.token; return true; }
+    try { sessionStorage.removeItem(AUTH_KEY); } catch(e) {}
+  }
+  // Only local unsafe development mode may have no credentials.
+  const unauthenticatedUser = await checkAuth('');
+  if (unauthenticatedUser) { authUser = unauthenticatedUser; authToken = ''; return true; }
+  return showLogin();
+}
+async function logoutAccount() {
+  try {
+    await fetch('/api/auth/logout', {method: 'POST', headers: authHeaders(), cache: 'no-store'});
+  } catch(e) { /* Logging out locally still works without network. */ }
+  try { sessionStorage.removeItem(AUTH_KEY); } catch(e) {}
+  location.reload();
+}
+async function apiFetch(url, options={}) {
+  const makeRequest = () => fetch(url, {
+    ...options, headers: {...(options.headers || {}), ...authHeaders()}, cache: 'no-store'
+  });
+  let response = await makeRequest();
+  if (response.status === 401) {
+    try { sessionStorage.removeItem(AUTH_KEY); } catch(e) {}
+    const previousUser = authUser;
+    await showLogin();
+    if (authUser !== previousUser) {
+      location.reload();
+      throw new Error('Пользователь изменён, страница перезагружается');
+    }
+    response = await makeRequest();
+  }
+  return response;
 }
 
 /* POSITION / COVER */
@@ -494,7 +635,159 @@ const COVER_LABELS = {
 function getPositionInfo(pos) { return POSITION_LABELS[pos] || { icon: '❔', label: pos || '—', mod: 0 }; }
 function getCoverInfo(cov) { return COVER_LABELS[cov] || { icon: '', label: cov || '—', mod: 0 }; }
 
-/* ═══════════ TTS ═══════════ */
+/* CHARACTER INSIGNIA — lightweight emoji stickers, calculated from saved character fields.
+   Works with both new and pre-existing campaigns, including names entered directly in chat. */
+const CHARACTER_CHOICES = {
+  race: [
+    ['Человек','🧑'], ['Эльф','🧝'], ['Полуэльф','🌿'],
+    ['Дварф','🪓'], ['Гном','🛠️'], ['Полурослик','🍀'],
+    ['Орк','👹'], ['Полуорк','🛡️'], ['Тифлинг','😈'],
+    ['Драконорождённый','🐉'], ['Дроу','🌙'], ['Фея','🧚']
+  ],
+  class: [
+    ['Воин','⚔️'], ['Маг','🧙'], ['Плут','🗡️'],
+    ['Следопыт','🏹'], ['Паладин','🛡️'], ['Варвар','🪓'],
+    ['Жрец','✨'], ['Друид','🌳'], ['Бард','🎵'],
+    ['Колдун','🔮'], ['Чародей','🌟'], ['Монах','🥋']
+  ],
+  background: [
+    ['Преступник','⛓️'], ['Солдат','🎖️'], ['Мудрец','📚'],
+    ['Благородный','👑'], ['Народный герой','🌾'], ['Отшельник','🏕️'],
+    ['Артист','🎭'], ['Бродяга','🎒'], ['Моряк','⚓'],
+    ['Наёмник','💰'], ['Шарлатан','🃏'], ['Прислужник','🕯️']
+  ]
+};
+const CHARACTER_ALIASES = {
+  race: [
+    [/полуэльф|half.?elf/, '🌿'], [/полуорк|half.?orc/, '🛡️'],
+    [/дроу|тёмн.*эльф|dark elf/, '🌙'],
+    [/драконорож|драконид|dragonborn/, '🐉'],
+    [/тифлинг|tiefling/, '😈'], [/орк|orcs?/, '👹'],
+    [/эльф|elf/, '🧝'], [/дварф|дворф|гном.*гор|dwarf/, '🪓'],
+    [/полуросл|халфлинг|хоббит|halfling/, '🍀'],
+    [/гном|gnome/, '🛠️'], [/фе[яи]|fairy/, '🧚'],
+    [/гоблин|goblin/, '👺'], [/нежить|скелет|undead/, '💀'],
+    [/человек|люди|human/, '🧑']
+  ],
+  class: [
+    [/паладин|paladin/, '🛡️'], [/варвар|berserk|barbarian/, '🪓'],
+    [/плут|вор|разбойник|assassin|rogue/, '🗡️'],
+    [/следопыт|рейнджер|ranger|лучник|охотник/, '🏹'],
+    [/колдун|чернокнижник|warlock/, '🔮'],
+    [/чародей|sorcerer/, '🌟'], [/маг|волшебник|чароде[йя]|wizard|mage/, '🧙'],
+    [/жрец|клирик|cleric|священник/, '✨'],
+    [/друид|druid/, '🌳'], [/бард|bard/, '🎵'],
+    [/монах|monk/, '🥋'], [/воин|рыцарь|fighter|knight|боец/, '⚔️']
+  ],
+  background: [
+    [/преступник|вор|бандит|criminal|контрабандист/, '⛓️'],
+    [/солдат|военн|ветеран|soldier/, '🎖️'],
+    [/мудрец|учён|исследователь|sage|учитель/, '📚'],
+    [/благород|аристократ|дворянин|noble/, '👑'],
+    [/народн.*геро|folk hero/, '🌾'], [/отшельник|hermit/, '🏕️'],
+    [/артист|акт[её]р|artist|entertainer/, '🎭'],
+    [/бродяг|беспризор|urchin|странник/, '🎒'],
+    [/моряк|пират|sailor|pirate/, '⚓'],
+    [/на[её]мник|mercenary/, '💰'], [/шарлатан|мошенник|charlatan/, '🃏'],
+    [/прислужник|служитель|acolyte/, '🕯️']
+  ]
+};
+function characterIcon(kind, value) {
+  const text = String(value || '').trim().toLowerCase().replace(/ё/g, 'е');
+  if (!text) return '❔';
+  const choice = (CHARACTER_CHOICES[kind] || []).find(([label]) => label.toLowerCase().replace(/ё/g, 'е') === text);
+  if (choice) return choice[1];
+  const alias = (CHARACTER_ALIASES[kind] || []).find(([pattern]) => pattern.test(text));
+  return alias ? alias[1] : ({race:'🧬', class:'🎯', background:'📜'}[kind] || '❔');
+}
+function identityTag(kind, value, label = '') {
+  if (!value) return '';
+  const icon = characterIcon(kind, value);
+  return `<span class="identity-tag" title="${esc(label || value)}"><span class="symbol" aria-hidden="true">${icon}</span>${esc(value)}</span>`;
+}
+function characterIdentity(st) {
+  return identityTag('race', st.race, 'Раса') + identityTag('class', st.class, 'Класс') + identityTag('background', st.background, 'Предыстория');
+}
+
+/* Creation form is optional: players can still describe any character in free text. */
+function openCharacterCreator(world = null) {
+  if (busy) return;
+  if (messages.length && !confirm('Начать новую игру? Несохранённый прогресс текущего приключения будет потерян.')) return;
+  const picked = {race:'', class:'', background:''};
+  const sections = [
+    ['race', '🧬 Раса'], ['class', '⚔️ Класс'], ['background', '📜 Предыстория']
+  ];
+  modalContent.innerHTML = `
+    <h3>🧬 Создание персонажа${world ? ' · ' + esc(world.name) : ''}</h3>
+    <div class="creator-hint">Выберите три значка. Они появятся в вашем профиле без генерации картинок.</div>
+    <label for="creator-name">Имя персонажа</label>
+    <input id="creator-name" maxlength="60" placeholder="Например, Арден" autocomplete="off">
+    ${sections.map(([key, heading]) => `
+      <div class="creator-group"><div class="creator-heading">${heading}</div>
+        <div class="creator-options" data-options="${key}">
+          ${CHARACTER_CHOICES[key].map(([value, icon]) => `<button type="button" class="creator-option" data-group="${key}" data-value="${esc(value)}" aria-pressed="false"><span class="symbol" aria-hidden="true">${icon}</span><span>${esc(value)}</span></button>`).join('')}
+          <button type="button" class="creator-option" data-group="${key}" data-value="__other__" aria-pressed="false"><span class="symbol" aria-hidden="true">✍️</span><span>Свой вариант</span></button>
+        </div>
+        <input class="creator-custom" id="creator-custom-${key}" maxlength="70" placeholder="Укажите свой вариант" aria-label="Свой вариант: ${heading}" style="display:none">
+      </div>`).join('')}
+    <div class="creator-heading">Ваши значки</div><div class="creator-preview" id="creator-preview"></div>
+    <label for="creator-details">Дополнительно (необязательно)</label>
+    <input id="creator-details" maxlength="350" placeholder="Характер, внешность, цель, особенности мира">
+    <div id="creator-error" class="creator-hint" role="alert"></div>
+    <button type="button" class="btn primary" id="creator-submit">✨ Начать приключение</button>
+    ${world ? '<button type="button" class="btn" id="creator-skip">🎲 Начать без анкеты</button>' : ''}
+    <button type="button" class="btn" id="creator-cancel">Отмена</button>`;
+  modalEl.classList.add('open');
+  const preview = document.getElementById('creator-preview');
+  const error = document.getElementById('creator-error');
+  const valueFor = key => picked[key] === '__other__'
+    ? document.getElementById('creator-custom-' + key).value.trim() : picked[key];
+  function redraw() {
+    preview.innerHTML = sections.map(([key]) => {
+      const val = valueFor(key);
+      return val ? identityTag(key, val) : `<span class="identity-tag"><span class="symbol">❔</span>${({race:'Раса',class:'Класс',background:'Предыстория'})[key]}</span>`;
+    }).join('');
+    error.textContent = '';
+  }
+  modalContent.querySelectorAll('.creator-option').forEach(button => button.onclick = () => {
+    const kind = button.dataset.group;
+    picked[kind] = button.dataset.value;
+    modalContent.querySelectorAll(`[data-group="${kind}"]`).forEach(b => {
+      const selected = b === button;
+      b.classList.toggle('selected', selected);
+      b.setAttribute('aria-pressed', String(selected));
+    });
+    const custom = document.getElementById('creator-custom-' + kind);
+    custom.style.display = picked[kind] === '__other__' ? 'block' : 'none';
+    redraw();
+    if (picked[kind] === '__other__') custom.focus();
+  });
+  modalContent.querySelectorAll('.creator-custom').forEach(i => i.addEventListener('input', redraw));
+  document.getElementById('creator-cancel').onclick = () => modalEl.classList.remove('open');
+  function startGame(description, hero = null) {
+    modalEl.classList.remove('open');
+    messages = []; state = {...EMPTY_STATE, ...(hero || {})}; memory = {}; uiEvents = [];
+    ttsStop(); chatEl.innerHTML = ''; renderStatus(); persist();
+    sendMessage(description, {characterCreated: !!hero});
+  }
+  document.getElementById('creator-submit').onclick = () => {
+    const name = document.getElementById('creator-name').value.trim();
+    const race = valueFor('race'), cls = valueFor('class'), background = valueFor('background');
+    if (!name || !race || !cls || !background) {
+      error.textContent = 'Заполните имя и выберите расу, класс и предысторию.';
+      return;
+    }
+    const details = document.getElementById('creator-details').value.trim();
+    const description = `${world ? world.prompt + '\n' : ''}Мой персонаж: имя — ${name}; раса — ${race}; класс — ${cls}; предыстория — ${background}. ${details} Создай лист героя для профиля, но в ответе не перечисляй характеристики и умения: кратко представь героя и начни первую сцену в 4–6 коротких абзацах.`;
+    startGame(description, {name, race, class: cls, background});
+  };
+  if (world) document.getElementById('creator-skip').onclick = () => {
+    startGame(world.prompt + ' Если я ещё не описал персонажа — сначала предложи 2–3 варианта расы, класса и предыстории на выбор.');
+  };
+  redraw();
+}
+
+/* TTS */
 const tts = {
   enabled: false, voice: null, rate: 1.0, speaking: false,
   lastText: '', available: ('speechSynthesis' in window)
@@ -532,7 +825,7 @@ function ttsClean(text) {
   return text
     .replace(/\[\[.*?\]\]/g, '').replace(/\[.*?\]/g, '')
     .replace(/\*+.*?\*+/g, '')
-    .replace(/[🎲🔊🔈⏩⏹🎙🖼📜💾📂✨❓🌍🔍🚶🗣⚔🛌🎒🎯🧍🪑🧎🐎🏊🪜🤝⛓🛡⭐📈✓✗●▶○🎁🏛👤📝✉🔔💬📔🔄📤📥📋✅📁]/g, '')
+    .replace(/[🎲🔊🔈⏩⏹🎙🖼📜💾📂✨❓🌍🔍🚶🗣⚔🛌🎒🎯🧍🪑🧎🐎🏊🪜🤝⛓🛡⭐📈✓✗●▶○🎁🏛👤📝✉🔔💬📔]/g, '')
     .replace(/https?:\/\/\S+/g, '')
     .replace(/[\u{1F000}-\u{1FAFF}]/gu, '')
     .replace(/\s+/g, ' ').trim();
@@ -665,7 +958,6 @@ function renderStatus() {
   const c = (state.conditions || []).length
     ? ' · ' + state.conditions.map(x => `<span style="color:#d45a5a">${esc(x)}</span>`).join(', ')
     : '';
-  const raceClass = [state.race, state.class].filter(Boolean).join(' · ');
   const dc = state.dc_modifier || 0;
   let dcChip = '';
   if (dc !== 0) {
@@ -681,22 +973,22 @@ function renderStatus() {
     ? `<span class="status-chip cover">${covInfo.icon} ${esc(covInfo.label)}</span>` : '';
   const restrChip = state.restrained
     ? `<span class="status-chip dc-up">⛓ Связан</span>` : '';
-
   statusEl.innerHTML = `
     <div class="status-top">
-      <div class="identity">
-        <div class="identity-name">${esc(state.name || 'Пустой')}</div>
-        <div class="identity-sub">${esc(raceClass || 'раса и класс пока не определены')}</div>
+      <button class="identity-crest" type="button" title="Открыть лист персонажа" aria-label="Открыть лист персонажа">${characterIcon('class', state.class)}</button>
+      <div class="status-info">
+        <div class="status-name">${esc(state.name || 'Пустой')}</div>
+        <div class="identity-tags">${characterIdentity(state)}</div>
+        <div class="status-chips">
+          <span class="status-chip">Ур. ${state.level}</span>
+          ${state.level_pending ? `<span class="status-chip" title="Обсуди повышение с мастером">⬆ Повышение!</span>` : ''}
+          <span class="status-chip">💰 ${state.gold}</span>
+          ${posChip}
+          ${covChip}
+          ${restrChip}
+          ${dcChip}
+        </div>
       </div>
-    </div>
-    <div class="status-chips">
-      <span class="status-chip">Ур. ${state.level}</span>
-      ${state.level_pending ? `<span class="status-chip" title="Обсуди повышение с мастером">⬆ Повышение!</span>` : ''}
-      <span class="status-chip">💰 ${state.gold}</span>
-      ${posChip}
-      ${covChip}
-      ${restrChip}
-      ${dcChip}
     </div>
     <div class="status-row"><span style="color:#d45a5a;font-size:11px;width:20px">HP</span>
       <div class="bar-wrap"><div class="bar-fill bar-hp" style="width:${hpPct}%"></div></div>
@@ -705,7 +997,8 @@ function renderStatus() {
       <div class="bar-wrap"><div class="bar-fill bar-xp" style="width:${xpPct}%"></div></div>
       <span class="bar-label">${state.xp}/${state.xp_next}</span></div>
     ${c ? `<div class="status-row" style="font-size:12px;color:var(--text-secondary)">${c}</div>` : ''}`;
-
+  const crest = statusEl.querySelector('.identity-crest');
+  if (crest) crest.onclick = doSheet;
   updateNotesBadge();
 }
 
@@ -743,35 +1036,120 @@ function addHtmlMsg(role, html) {
   chatEl.appendChild(d); scrollBottom(); return d;
 }
 
-/* API CALLS */
-let quotaSnapshot = null;
-async function refreshQuota() {
-  try {
-    const response = await fetch('/api/quota');
-    if (!response.ok) return;
-    quotaSnapshot = await response.json();
-    const label = quotaSnapshot.tier === 'subscription' ? 'Сегодня' : 'Ходы';
-    document.getElementById('quota-counter').textContent = `${label}: ${quotaSnapshot.remaining}`;
-  } catch (_) {
-    document.getElementById('quota-counter').textContent = 'Ходы: —';
+/* Gameplay cards are local UI events, NOT model dialogue. Their position is
+   counted in dialogue messages, so dice/stats survive saved-game restore without
+   changing XP IDs or incremental campaign memory hashes. */
+const STAT_LABELS = [
+  ['str', 'СИЛ', 'Сила'], ['dex', 'ЛОВ', 'Ловкость'], ['con', 'ТЕЛ', 'Телосложение'],
+  ['int', 'ИНТ', 'Интеллект'], ['wis', 'МДР', 'Мудрость'], ['cha', 'ХАР', 'Харизма']
+];
+function snapshotCharacter(st) {
+  const s = st && typeof st === 'object' ? st : {};
+  const stats = {};
+  for (const [key] of STAT_LABELS) {
+    const n = Number((s.stats || {})[key]);
+    stats[key] = Number.isFinite(n) ? n : null;
   }
+  return {
+    name: s.name || 'Герой', race: s.race || '', class: s.class || '',
+    background: s.background || '', level: s.level ?? 1,
+    hp: s.hp ?? 10, max_hp: s.max_hp ?? 10, xp: s.xp ?? 0,
+    xp_next: s.xp_next ?? 100, gold: s.gold ?? 0, stats
+  };
 }
-async function quotaModal() {
-  await refreshQuota();
-  const q = quotaSnapshot;
-  const account = q ? q.account_id : 'недоступен';
-  const remaining = q ? q.remaining : '?';
-  const label = q && q.tier === 'subscription' ? 'Подписка' : q && q.tier === 'pack' ? 'Пакет' : 'Бесплатный доступ';
-  modalContent.innerHTML = `<h3>🎫 Ходы и доступ</h3>
-    <p><b>${esc(label)}</b> · осталось ходов: <b>${esc(remaining)}</b></p>
-    <p class="save-note">Бесплатных ходов для нового браузера: ${q ? q.free_total : '40'}. Учёт идёт на сервере, по защищённой cookie. Очистка браузера не переносит сохранения.</p>
-    <p class="save-note">Автоматическая оплата ещё не подключена. Пакет из 300 ходов или подписку может выдать администратор вручную.</p>
-    <div style="font-size:12px;color:var(--text-secondary)">ID доступа (для администратора):<br><code style="overflow-wrap:anywhere">${esc(account)}</code></div>
-    <button class="btn primary" id="quota-close" style="margin-top:12px">Закрыть</button>`;
-  modalEl.classList.add('open');
-  document.getElementById('quota-close').onclick = () => modalEl.classList.remove('open');
+function characterSheetHtml(s) {
+  const stats = s.stats || {};
+  const statBoxes = STAT_LABELS.map(([key, shortName, longName]) => {
+    const val = Number(stats[key]);
+    const valid = stats[key] !== null && stats[key] !== undefined && Number.isFinite(val);
+    const modifier = valid ? Math.floor((val - 10) / 2) : null;
+    const modText = modifier === null ? '—' : (modifier >= 0 ? '+' : '') + modifier;
+    return `<div class="sheet-stat" title="${longName}"><div class="sheet-stat-name">${shortName}</div><div class="sheet-stat-value">${valid ? esc(val) : '—'}</div><div class="sheet-stat-mod">${modText}</div></div>`;
+  }).join('');
+  return `<div class="sheet-heading">📜 Лист героя · ${esc(s.name || 'Герой')}</div>
+    <div class="identity-tags">${characterIdentity(s)}</div>
+    <div class="sheet-meta"><span>⭐ Уровень ${esc(s.level ?? 1)}</span>
+    <span>❤️ HP ${esc(s.hp ?? 10)}/${esc(s.max_hp ?? 10)}</span>
+    <span>✨ XP ${esc(s.xp ?? 0)}/${esc(s.xp_next ?? 100)}</span>
+    <span>🪙 Золото ${esc(s.gold ?? 0)}</span></div>
+    <div class="sheet-stats">${statBoxes}</div>
+    <div class="sheet-footer">Полный лист и умения — в профиле персонажа.</div>`;
 }
-async function callAI(msgs) {
+function diceResultHtml(roll) {
+  const rolls = Array.isArray(roll.rolls) ? roll.rolls.map(n => esc(n)).join(' + ') : '';
+  const mod = Number(roll.mod) || 0;
+  const modText = mod === 0 ? '' : (mod > 0 ? ' + ' : ' − ') + Math.abs(mod);
+  const calc = rolls ? `${rolls}${modText} = ${esc(roll.total)}` : esc(roll.total);
+  const label = roll.label ? ` ${esc(String(roll.label).slice(0, 40))}` : ' кубика';
+  const dc = Number(roll.dc);
+  const difficulty = roll.dc !== undefined && roll.dc !== null && Number.isInteger(dc) && dc > 0 && dc <= 99
+    ? ` · Сложность ${dc}` : '';
+  return `<div class="dice-label">🎲 Бросок${label}</div>
+    <div><b>${esc(roll.expr)}</b> → <span class="dice-total">${esc(roll.total)}</span></div>
+    <div class="dice-details">Расчёт: ${calc}${difficulty}</div>`;
+}
+/* Resolve the check most recently ANNOUNCED by the GM. A quick 1d20 roll
+   inherits its explicitly displayed modifier; never guess the modifier for
+   unrelated dice or override /roll 1d20+N entered by the player. */
+function pendingDeclaredCheck() {
+  const last = messages[messages.length - 1];
+  if (!last || last.role !== 'assistant') return null;
+  const text = String(last.content || '').slice(-600);
+  const checks = /(?:бросок|проверка|бросьте|киньте|кидайте|проверьте)[^\r\n]{0,180}/gi;
+  const stats = [
+    [/ловкост/i, 'dex', 'Ловкости'],
+    [/телосложен/i, 'con', 'Телосложения'],
+    [/интеллект/i, 'int', 'Интеллекта'],
+    [/мудрост/i, 'wis', 'Мудрости'],
+    [/харизм/i, 'cha', 'Харизмы'],
+    [/сил[аыуе]/i, 'str', 'Силы']
+  ];
+  let found = null;
+  for (const sectionMatch of text.matchAll(checks)) {
+    const section = sectionMatch[0];
+    const dice = /(?:1d20|d20)(?![\w])\s*([+\-−]\s*\d{1,2})?/i.exec(section);
+    if (!dice) continue;
+    const attribute = stats.find(([re]) => re.test(section));
+    let modifier = 0;
+    if (dice[1]) {
+      modifier = Number(dice[1].replace(/\s/g, '').replace('−', '-'));
+      // Example: 1d20+2 (Ловкость) +1 (Акробатика).
+      // Only accept another immediately adjacent, labelled bonus; never
+      // accidentally add a DC adjustment mentioned later in the scene.
+      const afterDice = section.slice(dice.index + dice[0].length);
+      const skill = /^(?:\s*\([^)]{1,40}\))?\s*([+\-−]\s*\d{1,2})(?=\s*(?:\(|$|[—–,]))/.exec(afterDice);
+      if (skill) modifier += Number(skill[1].replace(/\s/g, '').replace('−', '-'));
+    } else if (attribute) {
+      const score = Number(state && state.stats && state.stats[attribute[1]]);
+      if (Number.isFinite(score) && score >= 1 && score <= 30) {
+        modifier = Math.floor((score - 10) / 2);
+      }
+    }
+    const dcMatch = /(?:сложност[ьи]|\bDC\b|\bКС\b)\s*[:=№]?\s*(\d{1,2})(?!\d)/i.exec(section);
+    found = {
+      mod: Number.isInteger(modifier) ? modifier : 0,
+      label: attribute ? attribute[2] : '',
+      dc: dcMatch ? Number(dcMatch[1]) : null
+    };
+  }
+  return found;
+}
+
+function showUiEvent(event) {
+  if (event.kind === 'character_sheet') return addHtmlMsg('character-sheet', characterSheetHtml(event.sheet || {}));
+  if (event.kind === 'dice') return addHtmlMsg('dice', diceResultHtml(event.roll || {}));
+}
+function recordUiEvent(event) {
+  uiEvents.push({...event, at: messages.length});
+  showUiEvent(event);
+  persist();
+}
+function isCharacterReady(s) {
+  return !!(s && s.name && s.name !== 'Пустой' && (s.race || s.class));
+}
+
+/* API CALLS */
+async function callAI(msgs, options = {}) {
   busy = true; sendBtn.disabled = true;
   document.querySelectorAll('.quick-btn').forEach(b => b.disabled = true);
   if (tts.speaking) ttsStop();
@@ -779,38 +1157,36 @@ async function callAI(msgs) {
   md.className = 'msg master typing-indicator';
   chatEl.appendChild(md); scrollBottom();
   let full = '';
-  let turnTicket = '';
+  let streamFailed = false;
   try {
-    const res = await fetch('/api/chat', {
+    const res = await apiFetch('/api/chat', {
       method: 'POST', headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({messages: msgs, state})
+      body: JSON.stringify({messages: msgs, state, memory})
     });
-    if (!res.ok) {
-      const error = await res.json().catch(() => ({}));
-      throw new Error(error.error || ('HTTP ' + res.status));
-    }
-    turnTicket = res.headers.get('X-Turn-Ticket') || '';
+    if (!res.ok) throw new Error('HTTP ' + res.status);
     const reader = res.body.getReader(); const dec = new TextDecoder();
     md.classList.remove('typing-indicator');
     while (true) {
       const {done, value} = await reader.read();
       if (done) break;
-      const c = dec.decode(value, {stream: true});
+      const c = dec.decode(value, { stream: true});
       if (!c) continue;
       full += c; md.textContent = full; scrollBottom();
     }
     const t = dec.decode();
     if (t) { full += t; md.textContent = full; scrollBottom(); }
   } catch(e) {
+    streamFailed = true;
     md.classList.remove('typing-indicator');
-    md.textContent = (full || '') + `\n[Ошибка: ${e.message}]`;
+    md.remove();
+    addMsg('system', `Ошибка ответа ИИ: ${e.message}. Ответ не записан в историю.`);
   }
   if (full.trim() && full.includes('[Ошибка API:')) {
     md.remove();
     addMsg('system', full.trim() + '\n\nОтвет не добавлен в историю игры. Можно повторить отправку.');
     full = '';
   }
-  if (full.trim()) {
+  if (full.trim() && !streamFailed) {
     messages.push({role: 'assistant', content: full});
     persist();
     md.remove();
@@ -822,26 +1198,26 @@ async function callAI(msgs) {
         ttsSpeak(full, btn);
       }, 60);
     }
-    await updateState(turnTicket);
+    const wasEmptyCharacter = !isCharacterReady(state);
+    const stateOk = await updateState();
+    if (stateOk && isCharacterReady(state) &&
+        (options.characterCreated || wasEmptyCharacter) &&
+        !uiEvents.some(e => e.kind === 'character_sheet')) {
+      recordUiEvent({kind: 'character_sheet', sheet: snapshotCharacter(state)});
+    }
+    await updateMemory();
   }
-  await refreshQuota();
   busy = false; sendBtn.disabled = false;
   document.querySelectorAll('.quick-btn').forEach(b => b.disabled = false);
   inputEl.focus();
 }
-async function updateState(ticket) {
-  if (!ticket) { addMsg('system', 'Не получено подтверждение хода — лист персонажа не обновлён.'); return; }
+async function updateState() {
   if (!state) state = {...EMPTY_STATE};
   try {
-    const res = await fetch('/api/state', {
-      method: 'POST', headers: {'Content-Type': 'application/json', 'X-Turn-Ticket': ticket},
+    const res = await apiFetch('/api/state', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({messages, state})
     });
-    if (!res.ok) {
-      const error = await res.json().catch(() => ({}));
-      addMsg('system', 'Лист персонажа не обновился: ' + (error.error || ('HTTP ' + res.status)));
-      return;
-    }
     if (res.ok) {
       const oldLevel = Number(state.level || 1);
       state = await res.json();
@@ -850,13 +1226,32 @@ async function updateState(ticket) {
         addMsg('system', `🎉 Доступно повышение уровня: ${state.level} (получено уровней: ${gained}). Обсуди с мастером выбор повышения характеристик и умения.`);
       }
       renderStatus(); persist();
+      return true;
     }
-  } catch(e){}
+    return false;
+  } catch(e) {
+    addMsg('system', 'Не удалось обновить лист персонажа: ' + e.message);
+    return false;
+  }
+}
+
+async function updateMemory() {
+  const summarizedCount = Number(memory && memory.covered_count || 0);
+  if (messages.length - summarizedCount < 26) return;
+  try {
+    const res = await apiFetch('/api/memory', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({messages, memory})
+    });
+    if (!res.ok) throw new Error('HTTP ' + res.status);
+    memory = await res.json();
+    persist();
+  } catch(e) { console.warn('Память пока не обновлена:', e); }
 }
 
 /* SEND */
-async function sendMessage(text) {
-  if (busy) return;
+async function sendMessage(text, options = {}) {
+  if (busy || rolling) return;
   text = (text || '').trim();
   if (!text) return;
   if (text.startsWith('/')) {
@@ -865,11 +1260,13 @@ async function sendMessage(text) {
     handleCommand(c.toLowerCase(), r.join(' '));
     return;
   }
+  const createButton = chatEl.querySelector('[data-create-character]');
+  if (createButton) createButton.remove();
   addMsg('user', text);
   messages.push({role: 'user', content: text});
   persist();
   inputEl.value = ''; autosize();
-  await callAI(messages);
+  await callAI(messages, options);
 }
 function handleCommand(cmd, arg) {
   switch(cmd) {
@@ -886,24 +1283,38 @@ function handleCommand(cmd, arg) {
   }
 }
 async function doRoll(expr) {
-  if (busy) return;
+  if (busy || rolling) return;
+  // A plain d20 means "roll the check you just asked for" when the GM
+  // announced one. Explicit /roll 1d20+N always takes priority.
+  const check = /^\s*(?:1d20|d20)\s*$/i.test(String(expr)) ? pendingDeclaredCheck() : null;
+  const effectiveExpr = check && check.mod
+    ? `1d20${check.mod > 0 ? '+' : ''}${check.mod}` : expr;
+  rolling = true;
   const animDiv = addHtmlMsg('dice',
-    `<span class="dice-emoji">🎲</span> Бросок ${esc(expr)}...`);
-  await new Promise(r => setTimeout(r, 450));
-  animDiv.remove();
+    `<span class="dice-emoji">🎲</span> Бросок ${esc(effectiveExpr)}...`);
   try {
-    const res = await fetch('/api/roll', {
+    await new Promise(r => setTimeout(r, 450));
+    const res = await apiFetch('/api/roll', {
       method: 'POST', headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({expr})
+      body: JSON.stringify({expr: effectiveExpr})
     });
     const d = await res.json();
-    if (d.error) { addMsg('system', 'Ошибка броска: ' + d.error); return; }
-    const m = d.mod ? (d.mod > 0 ? '+' + d.mod : '' + d.mod) : '';
-    addHtmlMsg('dice', `🎲 <b>${esc(d.expr)}</b> → [${d.rolls.join(', ')}]${m} = <b>${d.total}</b>`);
+    if (!res.ok || d.error) throw new Error(d.error || 'Не удалось выполнить бросок');
+    const mod = d.mod ? (d.mod > 0 ? '+' + d.mod : '' + d.mod) : '';
+    animDiv.remove();
+    // Show the roll card BEFORE the master's streamed response, and keep it in saves.
+    recordUiEvent({kind: 'dice', roll: {
+      expr: d.expr, rolls: d.rolls, mod: d.mod, total: d.total,
+      label: check ? check.label : '', dc: check ? check.dc : null
+    }});
     messages.push({role: 'user', content:
-      `[[БРОСОК]] ${d.expr} → [${d.rolls.join(', ')}]${m} = ${d.total}. Сравни с DC, который ты объявил ранее. Опиши результат, успех/провал/осложнение. Не решай за игрока.`});
-    persist(); await callAI(messages);
-  } catch(e) { addMsg('system', 'Ошибка: ' + e.message); }
+      `[[БРОСОК]] ${d.expr} → [${d.rolls.join(', ')}]${mod} = ${d.total}. ` +
+      `Это ОКОНЧАТЕЛЬНЫЙ результат, бонус характеристики уже учтён: НЕ прибавляй модификаторы второй раз. ` +
+      `Сравни ${d.total} с DC, который ты объявил ранее. Опиши исход без повторного броска.`});
+    persist();
+    await callAI(messages);
+  } catch(e) { animDiv.remove(); addMsg('system', 'Ошибка броска: ' + e.message); }
+  finally { rolling = false; }
 }
 
 /* SHEET */
@@ -1012,14 +1423,18 @@ async function doSheet() {
     const m = Math.floor((val - 10) / 2);
     return m >= 0 ? '+' + m : '' + m;
   };
-
   const notesCount = (state.notes || []).length;
   const notesUnread = (state.notes || []).filter(n => n.unread).length;
 
   modalContent.innerHTML = `
-    <h3>📜 ${esc(state.name || 'Пустой')}</h3>
-    ${state.race || state.class ? `<div class="kv"><span class="k">Раса · Класс</span><span class="v">${esc(state.race || '—')} · ${esc(state.class || '—')}</span></div>` : ''}
-    ${state.background ? `<div class="kv"><span class="k">Предыстория</span><span class="v">${esc(state.background)}</span></div>` : ''}
+    <div class="identity-hero">
+      <div class="identity-hero-crest" aria-hidden="true">${characterIcon('class', state.class)}</div>
+      <div><h3>📜 ${esc(state.name || 'Пустой')}</h3>
+      <div class="identity-tags">${characterIdentity(state)}</div></div>
+    </div>
+    <div class="kv"><span class="k">Раса</span><span class="v">${characterIcon('race', state.race)} ${esc(state.race || '—')}</span></div>
+    <div class="kv"><span class="k">Класс</span><span class="v">${characterIcon('class', state.class)} ${esc(state.class || '—')}</span></div>
+    <div class="kv"><span class="k">Предыстория</span><span class="v">${characterIcon('background', state.background)} ${esc(state.background || '—')}</span></div>
     <div class="kv"><span class="k">Уровень</span><span class="v">${state.level}${state.level_pending ? ` · повышение доступно (${state.level_pending})` : ''}</span></div>
     <div class="kv"><span class="k">Опыт</span><span class="v">${state.xp} / ${state.xp_next}</span></div>
     <div class="kv"><span class="k">Здоровье</span><span class="v">${state.hp} / ${state.max_hp}</span></div>
@@ -1208,47 +1623,16 @@ async function doSkills() {
   modalEl.classList.add('open');
 }
 
-/* ═══════════ СОХРАНЕНИЯ ═══════════ */
-
-function fmtTime(ts) {
-  if (!ts) return 'время неизвестно';
-  const d = new Date(ts * 1000);
-  if (isNaN(d.getTime())) return 'время неизвестно';
-  const now = new Date();
-  const time = d.toLocaleTimeString('ru-RU', {hour: '2-digit', minute: '2-digit'});
-  if (d.toDateString() === now.toDateString()) return 'сегодня, ' + time;
-  const yest = new Date(now);
-  yest.setDate(now.getDate() - 1);
-  if (d.toDateString() === yest.toDateString()) return 'вчера, ' + time;
-  return d.toLocaleDateString('ru-RU', {day: '2-digit', month: '2-digit', year: 'numeric'})
-         + ', ' + time;
-}
-
-function fmtSize(bytes) {
-  if (!bytes && bytes !== 0) return '';
-  if (bytes < 1024) return bytes + ' Б';
-  if (bytes < 1024 * 1024) return Math.round(bytes / 1024) + ' КБ';
-  return (bytes / 1024 / 1024).toFixed(1) + ' МБ';
-}
-
+/* SAVE / LOAD / RESET / HELP */
 async function doSave(name) {
   if (!name) {
     name = await promptModal('Название сохранения', 'game-' + Date.now());
     if (!name) return;
   }
-  // Если имя занято — спросим. Прежняя версия останется в .bak.json
   try {
-    const r = await fetch('/api/saves');
-    const list = await r.json();
-    if (Array.isArray(list) && list.some(s => s.name === name)) {
-      if (!confirm(`Сохранение «${name}» уже есть. Перезаписать?`)) return;
-    }
-  } catch (e) { /* список недоступен — просто сохраняем */ }
-
-  try {
-    const res = await fetch('/api/save', {
+    const res = await apiFetch('/api/save', {
       method: 'POST', headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({name, messages, state})
+      body: JSON.stringify({name, messages, state, memory, ui_events: uiEvents})
     });
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     const d = await res.json();
@@ -1256,153 +1640,114 @@ async function doSave(name) {
     addMsg('system', `💾 Сохранено: «${d.name}»`);
   } catch(e) { addMsg('system', 'Ошибка сохранения: ' + e.message); }
 }
-
-/* Список сохранений: клик по имени — загрузить, ✎ — переименовать, 🗑 — удалить.
-   Промис разрешается именем выбранного сохранения либо null. */
-function savesModal() {
-  return new Promise(resolve => {
-    let items = [];
-    let note = '';
-    let closed = false;
-
-    const finish = v => { if (!closed) { closed = true; modalEl.classList.remove('open'); resolve(v); } };
-
-    async function refresh() {
-      try {
-        const r = await fetch('/api/saves');
-        const d = await r.json();
-        items = Array.isArray(d) ? d : [];
-      } catch (e) { items = []; }
-      render();
-    }
-
-    function render() {
-      const rows = items.length ? items.map(s => `
-        <div class="save-row">
-          <div class="save-col">
-            <div class="save-name" data-name="${esc(s.name)}" title="Нажмите, чтобы загрузить">${esc(s.name)}</div>
-            <div class="save-meta">${esc(fmtTime(s.saved_at))}${s.size ? ' · ' + esc(fmtSize(s.size)) : ''}</div>
-          </div>
-          <button class="note-action-btn" data-act="rename" data-name="${esc(s.name)}" title="Переименовать">✎</button>
-          <button class="note-action-btn" data-act="delete" data-name="${esc(s.name)}" title="Удалить">🗑</button>
-        </div>`).join('') : '<div class="tag empty">нет сохранений</div>';
-
-      modalContent.innerHTML = `
-        <h3>📂 Сохранения</h3>
-        ${note ? `<div class="save-note">${esc(note)}</div>` : ''}
-        <div style="display:flex;flex-direction:column;gap:8px;max-height:55vh;overflow-y:auto">${rows}</div>
-        <button class="btn primary" id="modal-cancel">Закрыть</button>`;
-      modalEl.classList.add('open');
-
-      modalContent.querySelectorAll('.save-name').forEach(el => {
-        el.onclick = () => finish(el.dataset.name);
-      });
-
-      modalContent.querySelectorAll('[data-act]').forEach(btn => {
-        btn.onclick = async (e) => {
-          e.stopPropagation();
-          const nm = btn.dataset.name;
-          if (btn.dataset.act === 'rename') {
-            const nn = await promptModal('Новое имя', nm);
-            if (!nn || nn === nm) { note = ''; render(); return; }
-            try {
-              const r = await fetch('/api/save/rename', {
-                method: 'POST', headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify({name: nm, new_name: nn})
-              });
-              const d = await r.json().catch(() => ({}));
-              note = d.ok ? `Переименовано: «${nm}» → «${nn}»`
-                          : 'Не удалось переименовать: ' + (d.error || ('HTTP ' + r.status));
-            } catch (err) { note = 'Не удалось переименовать: ' + err.message; }
-          } else {
-            if (!confirm(`Удалить сохранение «${nm}»?\n\nЭто необратимо.`)) { note = ''; render(); return; }
-            try {
-              const r = await fetch('/api/save/delete', {
-                method: 'POST', headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify({name: nm})
-              });
-              const d = await r.json().catch(() => ({}));
-              note = d.ok ? `Удалено: «${nm}»`
-                          : 'Не удалось удалить: ' + (d.error || ('HTTP ' + r.status));
-            } catch (err) { note = 'Не удалось удалить: ' + err.message; }
-          }
-          await refresh();
-        };
-      });
-
-      document.getElementById('modal-cancel').onclick = () => finish(null);
-    }
-
-    refresh();
-  });
-}
-
 async function doLoad(name) {
+  let saves;
+  try { saves = await (await apiFetch('/api/saves')).json(); }
+  catch(e) { addMsg('system', 'Ошибка: ' + e.message); return; }
+  if (!saves.length) { addMsg('system', 'Нет сохранений.'); return; }
   if (!name) {
-    name = await savesModal();
+    name = await listModal('Выберите сохранение', saves);
     if (!name) return;
   }
   try {
-    const res = await fetch('/api/load/' + encodeURIComponent(name));
+    const res = await apiFetch('/api/load/' + encodeURIComponent(name));
     if (!res.ok) throw new Error('не найдено');
     const d = await res.json();
     messages = d.messages || [];
     state = d.state || {...EMPTY_STATE};
-    resetSession();                 // резюме прежней партии больше не актуально
+    memory = d.memory || {};
+    uiEvents = Array.isArray(d.ui_events) ? d.ui_events : [];
     persist(); renderAll(); renderStatus();
-    addMsg('system', `📂 Загружено: «${name}»`);
+    await updateMemory();
+    addMsg('system', d.recovered_from_backup
+      ? `⚠️ Основное сохранение повреждено. Загружена резервная копия: «${name}». Сразу сохраните игру под новым именем.`
+      : `📂 Загружено: «${name}»`);
   } catch(e) { addMsg('system', 'Ошибка: ' + e.message); }
 }
-
-/* ═══════════ ПЕРЕНОС ПАРТИИ ═══════════
-   Переносит партию между браузерами и устройствами обычным текстом.
-   Во встроенных браузерах (Telegram, Instagram) нет ни консоли,
-   ни закладок, ни букмарклетов — а копирование текста работает везде.
-
-   Переносятся обе части партии:
-     messages — вся история ходов и ответов мастера
-     state    — персонаж: имя, раса, класс, уровень, XP, HP,
-                инвентарь, заметки, квесты, отношения. */
+async function manageSaves() {
+  let saves;
+  try {
+    const res = await apiFetch('/api/saves');
+    if (!res.ok) throw new Error('Не удалось получить список сохранений');
+    saves = await res.json();
+  } catch (e) { addMsg('system', 'Ошибка списка сохранений: ' + e.message); return; }
+  if (!saves.length) { addMsg('system', 'Нет сохранений для управления.'); return; }
+  modalContent.innerHTML = `<h3>Управление сохранениями</h3>
+    <div style="display:flex;flex-direction:column;gap:10px">
+      ${saves.map(name => `<div style="display:flex;align-items:center;gap:8px;padding:10px;background:var(--bg-card);border:1px solid var(--border-subtle);border-radius:8px">
+        <div style="flex:1;min-width:0;overflow-wrap:anywhere">${esc(name)}</div>
+        <button class="btn" data-rename="${esc(name)}" style="padding:7px 10px">✏️</button>
+        <button class="btn" data-delete="${esc(name)}" style="padding:7px 10px;color:#e57373">🗑️</button>
+      </div>`).join('')}
+    </div>
+    <button class="btn" id="manage-close">Закрыть</button>`;
+  modalEl.classList.add('open');
+  document.getElementById('manage-close').onclick = () => modalEl.classList.remove('open');
+  modalContent.querySelectorAll('[data-rename]').forEach(btn => btn.onclick = async () => {
+    const oldName = btn.dataset.rename;
+    const newName = await promptModal('Переименовать сохранение', oldName);
+    if (!newName) { manageSaves(); return; }
+    if (newName === oldName) { manageSaves(); return; }
+    try {
+      const res = await apiFetch('/api/save/rename', {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({old_name:oldName,new_name:newName})});
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || 'Не удалось переименовать');
+      addMsg('system', `✏️ Сохранение переименовано: «${oldName}» → «${data.name}»`);
+      manageSaves();
+    } catch(e) { addMsg('system', 'Ошибка переименования: ' + e.message); }
+  });
+  modalContent.querySelectorAll('[data-delete]').forEach(btn => btn.onclick = async () => {
+    const name = btn.dataset.delete;
+    if (!confirm(`Удалить сохранение «${name}» и его резервную копию? Это действие нельзя отменить.`)) return;
+    try {
+      const res = await apiFetch('/api/save/delete', {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name})});
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || 'Не удалось удалить');
+      addMsg('system', `🗑️ Удалено сохранение: «${name}»`);
+      manageSaves();
+    } catch(e) { addMsg('system', 'Ошибка удаления: ' + e.message); }
+  });
+}
 
 function doTransfer() {
-  const current = JSON.stringify({messages, state});
+  if (busy || rolling) { addMsg('system', 'Дождитесь завершения текущего действия, затем переносите партию.'); return; }
+  const current = JSON.stringify({
+    schema_version: 4, messages, state, memory, ui_events: uiEvents
+  }, null, 2);
   const charName = (state && state.name) || 'Пустой';
-
   modalContent.innerHTML = `
     <h3>🔄 Перенос партии</h3>
     <div class="transfer-hint">
-      <b>Сохранить копию:</b> нажмите «Скопировать» и вставьте текст в Заметки
-      или отправьте себе в «Избранное».<br>
-      <b>Загрузить:</b> вставьте текст в поле (или возьмите файл) и нажмите «Применить».
+      <b>Сохранить копию:</b> скопируйте текст или скачайте JSON-файл.
+      <br><b>Перенести на другое устройство:</b> войдите в тот же аккаунт и загрузите этот файл или вставьте текст.
+      <br><b>Импорт:</b> текущая партия будет заменена; сначала сохраните её, если хотите оставить копию.
     </div>
-    <textarea id="transfer-area" class="transfer-area" spellcheck="false"></textarea>
+    <textarea id="transfer-area" class="transfer-area" spellcheck="false" aria-label="Данные партии"></textarea>
     <div id="transfer-info" class="transfer-info"></div>
     <div class="transfer-row">
-      <button class="btn" id="transfer-copy">📋 Скопировать</button>
-      <button class="btn" id="transfer-download">💾 Скачать файл</button>
+      <button class="btn" id="transfer-copy" type="button">📋 Скопировать</button>
+      <button class="btn" id="transfer-download" type="button">💾 Скачать JSON</button>
     </div>
     <div class="transfer-row">
-      <button class="btn" id="transfer-file-btn">📁 Из файла</button>
-      <button class="btn primary" id="transfer-apply">✅ Применить</button>
+      <button class="btn" id="transfer-file-btn" type="button">📁 Выбрать файл</button>
+      <button class="btn primary" id="transfer-apply" type="button">✅ Импортировать</button>
     </div>
-    <input type="file" id="transfer-file" accept=".json,application/json" style="display:none">
-    <button class="btn" id="transfer-close">Закрыть</button>`;
+    <input type="file" id="transfer-file" accept=".json,application/json" hidden>
+    <button class="btn" id="transfer-close" type="button">Закрыть</button>`;
 
   const area = document.getElementById('transfer-area');
   const info = document.getElementById('transfer-info');
   const fileInput = document.getElementById('transfer-file');
   area.value = current;
 
-  const showInfo = (msg, warn) => {
-    if (msg) {
-      info.textContent = msg;
+  const showInfo = (message, warn = false) => {
+    if (message) {
+      info.textContent = message;
       info.className = 'transfer-info' + (warn ? ' warn' : '');
       return;
     }
     const kb = Math.max(1, Math.round(area.value.length / 1024));
-    info.textContent =
-      `В поле: ${kb} КБ. Текущая партия: сообщений ${messages.length}, ` +
-      `персонаж «${charName}».`;
+    info.textContent = `Размер: ${kb} КБ · сообщений: ${messages.length} · персонаж: «${charName}»`;
     info.className = 'transfer-info';
   };
   showInfo();
@@ -1415,117 +1760,212 @@ function doTransfer() {
     const btn = document.getElementById('transfer-copy');
     area.focus();
     area.select();
-    let ok = false;
+    let copied = false;
     try {
       if (navigator.clipboard && window.isSecureContext) {
         await navigator.clipboard.writeText(area.value);
-        ok = true;
+        copied = true;
       }
     } catch (e) {}
-    if (!ok) { try { ok = document.execCommand('copy'); } catch (e) {} }
-    btn.textContent = ok ? '✓ Скопировано' : 'Скопируйте вручную';
-    setTimeout(() => { btn.textContent = '📋 Скопировать'; }, 2000);
+    if (!copied) {
+      try { copied = document.execCommand('copy'); } catch (e) {}
+    }
+    btn.textContent = copied ? '✓ Скопировано' : 'Выделите и скопируйте вручную';
   };
 
   document.getElementById('transfer-download').onclick = () => {
     const stamp = new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-');
-    const blob = new Blob([area.value], {type: 'application/json'});
-    const a = document.createElement('a');
-    a.href = URL.createObjectURL(blob);
-    a.download = `rpg-${charName}-${stamp}.json`;
-    document.body.appendChild(a);
-    a.click();
-    document.body.removeChild(a);
-    setTimeout(() => URL.revokeObjectURL(a.href), 5000);
+    const safeName = String(charName).replace(/[^\wа-яёА-ЯЁ-]+/g, '_').slice(0, 40) || 'game';
+    const blob = new Blob([area.value], {type: 'application/json;charset=utf-8'});
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = `rpg-${safeName}-${stamp}.json`;
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 5000);
   };
 
   document.getElementById('transfer-file-btn').onclick = () => fileInput.click();
-
   fileInput.onchange = () => {
-    const f = fileInput.files && fileInput.files[0];
-    if (!f) return;
+    const file = fileInput.files && fileInput.files[0];
+    if (!file) return;
+    if (file.size > 4 * 1024 * 1024) {
+      showInfo('Файл больше 4 МБ. Выберите файл меньшего размера.', true);
+      fileInput.value = '';
+      return;
+    }
     const reader = new FileReader();
     reader.onload = () => { area.value = String(reader.result || ''); showInfo(); };
-    reader.readAsText(f);
+    reader.onerror = () => showInfo('Не удалось прочитать файл.', true);
+    reader.readAsText(file);
   };
 
   document.getElementById('transfer-apply').onclick = () => {
+    if (busy || rolling) { showInfo('Сначала дождитесь завершения текущего действия.', true); return; }
     const raw = area.value.trim();
     if (!raw) { showInfo('Поле пустое.', true); return; }
-    if (raw === current) { showInfo('Это ваша текущая партия — менять нечего.'); return; }
-
-    let d;
-    try {
-      d = JSON.parse(raw);
-    } catch (e) {
-      showInfo('Текст повреждён или скопирован не полностью.', true);
+    if (raw.length > 4 * 1024 * 1024) {
+      showInfo('Данные превышают 4 МБ.', true);
       return;
     }
-    if (!d || !Array.isArray(d.messages)) {
-      showInfo('Это не похоже на партию: нет списка сообщений.', true);
+    if (raw === current) { showInfo('Это текущая партия — менять нечего.'); return; }
+
+    let imported;
+    try { imported = JSON.parse(raw); }
+    catch (e) { showInfo('JSON повреждён или скопирован не полностью.', true); return; }
+
+    if (!imported || !Array.isArray(imported.messages) || imported.messages.length > 20000) {
+      showInfo('Файл не похож на партию: нужен список сообщений (не более 20000).', true);
       return;
     }
-    const nm = (d.state && d.state.name) || 'Пустой';
-    const lvl = (d.state && d.state.level) || 1;
-    if (!confirm(`Заменить текущую партию?\n\n` +
-                 `Загружаемая: «${nm}», уровень ${lvl}, сообщений ${d.messages.length}.\n` +
-                 `Текущая партия будет потеряна.`)) return;
+    const validMessages = imported.messages.every(m =>
+      m && (m.role === 'user' || m.role === 'assistant') && typeof m.content === 'string'
+    );
+    if (!validMessages) {
+      showInfo('В истории есть сообщения неверного формата.', true);
+      return;
+    }
 
-    messages = d.messages;
-    state = d.state || {...EMPTY_STATE};
-    resetSession();
+    const rawState = imported.state && typeof imported.state === 'object' && !Array.isArray(imported.state)
+      ? imported.state : {};
+    const importedState = {...EMPTY_STATE, ...rawState};
+    for (const key of ['name','race','class','background','position','cover','weapon_in_hand']) {
+      if (typeof importedState[key] !== 'string') importedState[key] = EMPTY_STATE[key];
+    }
+    for (const key of ['level','xp','xp_next','hp','max_hp','gold','dc_modifier','level_pending']) {
+      const value = Number(importedState[key]);
+      importedState[key] = Number.isFinite(value) ? Math.trunc(value) : EMPTY_STATE[key];
+    }
+    importedState.level = Math.max(1, importedState.level);
+    importedState.max_hp = Math.max(1, importedState.max_hp);
+    importedState.hp = Math.max(0, Math.min(importedState.max_hp, importedState.hp));
+    importedState.xp = Math.max(0, importedState.xp);
+    importedState.xp_next = Math.max(1, importedState.xp_next);
+    importedState.gold = Math.max(0, importedState.gold);
+    importedState.stats = importedState.stats && typeof importedState.stats === 'object' &&
+      !Array.isArray(importedState.stats) ? importedState.stats : {...EMPTY_STATE.stats};
+    for (const key of ['str','dex','con','int','wis','cha']) {
+      const value = Number(importedState.stats[key]);
+      importedState.stats[key] = Number.isFinite(value) ? Math.max(1, Math.min(30, Math.trunc(value))) : 10;
+    }
+    for (const key of ['proficiencies','skills','abilities','inventory','notes','quests','conditions',
+                       'relationships','faction_clocks','dc_modifier_reasons','level_history','xp_event_ids']) {
+      if (!Array.isArray(importedState[key])) importedState[key] = [];
+    }
+    if (typeof importedState.restrained !== 'boolean') importedState.restrained = false;
+
+    const importedMemory = imported.memory && typeof imported.memory === 'object' && !Array.isArray(imported.memory)
+      ? imported.memory : {};
+    const importedEvents = Array.isArray(imported.ui_events)
+      ? imported.ui_events.filter(e => e && Number.isInteger(e.at) && e.at >= 0 &&
+          e.at <= imported.messages.length && ['dice', 'character_sheet'].includes(e.kind) &&
+          (e.kind !== 'dice' || (e.roll && typeof e.roll === 'object')) &&
+          (e.kind !== 'character_sheet' || (e.sheet && typeof e.sheet === 'object')))
+        .slice(0, 2000).map(e => {
+          if (e.kind === 'character_sheet') {
+            const raw = e.sheet;
+            const safe = {...raw};
+            for (const key of ['name','race','class','background']) {
+              if (typeof safe[key] !== 'string') safe[key] = '';
+            }
+            safe.stats = safe.stats && typeof safe.stats === 'object' && !Array.isArray(safe.stats)
+              ? safe.stats : {};
+            return {...e, sheet: snapshotCharacter(safe)};
+          }
+          const roll = e.roll;
+          const num = value => Number.isFinite(Number(value)) ? Number(value) : 0;
+          return {...e, roll: {
+            expr: typeof roll.expr === 'string' ? roll.expr.slice(0, 80) : '1d20',
+            rolls: Array.isArray(roll.rolls) ? roll.rolls.slice(0, 100).map(num) : [],
+            mod: num(roll.mod), total: num(roll.total),
+            label: typeof roll.label === 'string' ? roll.label.slice(0, 40) : '',
+            dc: roll.dc == null ? null : num(roll.dc)
+          }};
+        })
+      : [];
+    const name = importedState.name || 'Пустой';
+    const level = importedState.level;
+    if (!confirm(`Заменить текущую партию?\n\nИмпортируемая: «${name}», уровень ${level}, сообщений ${imported.messages.length}.\nТекущая история будет заменена.`)) return;
+
+    messages = imported.messages;
+    state = importedState;
+    memory = importedMemory;
+    uiEvents = importedEvents;
     persist();
-    chatEl.innerHTML = '';
     renderAll();
     renderStatus();
     modalEl.classList.remove('open');
-    addMsg('system',
-      `🔄 Партия загружена: «${state.name || 'Пустой'}», уровень ${state.level || 1}, ` +
-      `сообщений ${messages.length}. Нажмите «💾 Сохранить», чтобы она попала на сервер.`);
+    addMsg('system', `🔄 Партия импортирована: «${name}», уровень ${level}, сообщений ${messages.length}.`);
   };
 
   modalEl.classList.add('open');
 }
 
 function doReset() {
-  if (!confirm('Начать новую игру? Текущая история будет потеряна.\n\n' +
-               'Совет: сначала сделайте «🔄 Перенос партии» → «Скопировать».')) return;
-  messages = []; state = {...EMPTY_STATE};
-  resetSession();
+  if (!confirm('Начать новую игру? Текущая история будет потеряна.')) return;
+  messages = []; state = {...EMPTY_STATE}; memory = {}; uiEvents = [];
   ttsStop();
   persist(); chatEl.innerHTML = ''; renderStatus(); showIntro();
 }
-
 function doHelp() {
   addHtmlMsg('system', 'Команды:<br><code>/roll 1d20+3</code> — бросок<br>' +
     '<code>/sheet</code> — полный лист<br><code>/skills</code> — умения и навыки<br>' +
     '<code>/notes</code> — заметки, письма, документы<br>' +
     '<code>/save имя</code> — сохранить<br><code>/load имя</code> — загрузить<br>' +
-    '<code>/transfer</code> — перенос партии<br><code>/reset</code> — новая игра<br><br>' +
+    '<code>/transfer</code> — экспорт или импорт партии между устройствами<br>' +
+    '<code>/reset</code> — новая игра<br><br>' +
+    'Быстрый d20 учитывает бонус последней проверки, объявленной мастером. Для ручного броска используйте /roll 1d20+3.<br>' +
     'Заметки, письма, документы, слухи — в отдельной вкладке 📝, не в инвентаре.<br>' +
-    'XP начисляется за убийства, победы без убийства и завершённые квесты.<br>' +
-    'В окне загрузки можно переименовать (✎) и удалить (🗑) сохранение.<br>' +
-    '🔄 Перенос партии — чтобы продолжить игру в другом браузере или на другом устройстве.');
+    'XP начисляется за убийства, победы без убийства и завершённые квесты.');
 }
-
 function renderAll() {
   chatEl.innerHTML = '';
-  messages.forEach(m => {
+  // Event positions point to the *next* dialogue message; events at the end
+  // are rendered after the most recent reply. Ignore invalid legacy entries.
+  const events = new Map();
+  (Array.isArray(uiEvents) ? uiEvents : []).forEach(event => {
+    if (!event || !Number.isInteger(event.at) || event.at < 0 || event.at > messages.length) return;
+    if (!['dice', 'character_sheet'].includes(event.kind)) return;
+    if (!events.has(event.at)) events.set(event.at, []);
+    events.get(event.at).push(event);
+  });
+  for (let i = 0; i <= messages.length; i++) {
+    for (const event of (events.get(i) || [])) showUiEvent(event);
+    if (i === messages.length) break;
+    const m = messages[i];
     if (m.role === 'user') {
-      const c = m.content.replace(/^\[\[(БРОСОК|СИСТЕМА)\]\]\s*/, '');
-      addMsg('user', c);
+      if (m.content.startsWith('[[БРОСОК]]')) {
+        // New dice cards already appear above; old saves still show the result.
+        if (!(events.get(i) || []).some(e => e.kind === 'dice')) {
+          const rollText = m.content.replace(/^\[\[БРОСОК\]\]\s*/, '').split('. Сравни с DC')[0];
+          addMsg('dice', '🎲 ' + rollText);
+        }
+      } else {
+        addMsg('user', m.content.replace(/^\[\[СИСТЕМА\]\]\s*/, ''));
+      }
     } else if (m.role === 'assistant') {
       addMsg('master', m.content);
     }
-  });
+  }
   const lastMaster = [...messages].reverse().find(m => m.role === 'assistant');
   if (lastMaster) tts.lastText = lastMaster.content;
 }
 function showIntro() {
   addMsg('system', 'Опишите персонажа, мир, тон и стартовую ситуацию.\n' +
+    'Можно нажать «🧬 Создать персонажа» ниже или написать героя своими словами.\n' +
     'Например: «Я — эльф-плут Кейр, Преступник. Тёмное фэнтези, город на болоте. Начинаю в камере.»\n\n' +
     'Мастер выставит характеристики, навыки, умения. XP за убийства и квесты начисляется автоматически.\n' +
     'Письма, документы и слухи — в отдельной вкладке 📝 Заметки.');
+  const createButton = document.createElement('button');
+  createButton.type = 'button';
+  createButton.className = 'btn primary';
+  createButton.dataset.createCharacter = '1';
+  createButton.textContent = '🧬 Создать персонажа · раса, класс, предыстория';
+  createButton.style.alignSelf = 'center';
+  createButton.onclick = () => openCharacterCreator();
+  chatEl.appendChild(createButton);
 }
 function renderWorlds() {
   const container = document.getElementById('worlds-section');
@@ -1539,15 +1979,7 @@ function renderWorlds() {
       if (!world || busy) return;
       drawerEl.classList.remove('open');
       drawerBg.classList.remove('open');
-      messages = []; state = {...EMPTY_STATE};
-      resetSession();
-      ttsStop();
-      chatEl.innerHTML = '';
-      renderStatus();
-      addMsg('system', `Выбран мир: ${world.name}\n${world.desc}\n\nОпишите персонажа: раса, класс, имя, предыстория.`);
-      messages.push({role: 'user', content: world.prompt + ' Если я не описал персонажа — сначала предложи 2–3 варианта расы, класса и предыстории на выбор.'});
-      persist();
-      callAI(messages);
+      openCharacterCreator(world);
     };
   });
 }
@@ -1607,7 +2039,20 @@ function promptModal(title, ph) {
     };
   });
 }
-
+function listModal(title, items) {
+  return new Promise(res => {
+    modalContent.innerHTML = `<h3>${title}</h3>
+      <div style="display:flex;flex-direction:column;gap:8px">
+        ${items.map(i => `<div class="save-item" data-name="${esc(i)}">${esc(i)}</div>`).join('')}
+      </div>
+      <button class="btn" id="modal-cancel">Закрыть</button>`;
+    modalEl.classList.add('open');
+    const close = v => { modalEl.classList.remove('open'); res(v); };
+    modalContent.querySelectorAll('.save-item').forEach(el =>
+      el.onclick = () => close(el.dataset.name));
+    document.getElementById('modal-cancel').onclick = () => close(null);
+  });
+}
 function autosize() {
   inputEl.style.height = 'auto';
   inputEl.style.height = Math.min(inputEl.scrollHeight, 120) + 'px';
@@ -1658,23 +2103,28 @@ document.querySelectorAll('#drawer .btn[data-action]').forEach(btn => {
     const a = btn.dataset.action;
     if (a === 'dice') doRoll('1d20');
     else if (a === 'dice-custom') rollModal().then(v => { if (v) doRoll(v); });
+    else if (a === 'create') openCharacterCreator();
     else if (a === 'sheet') doSheet();
     else if (a === 'skills') doSkills();
     else if (a === 'notes') doNotes();
     else if (a === 'save') doSave();
     else if (a === 'load') doLoad();
+    else if (a === 'manage-saves') manageSaves();
     else if (a === 'transfer') doTransfer();
-    else if (a === 'quota') quotaModal();
     else if (a === 'reset') doReset();
     else if (a === 'help') doHelp();
+    else if (a === 'logout') logoutAccount();
   };
 });
 
-function init() {
+async function init() {
+  await ensureAuth();
   const saved = restore();
   if (saved && saved.messages.length) {
     messages = saved.messages;
     state = saved.state || {...EMPTY_STATE};
+    memory = saved.memory || {};
+    uiEvents = Array.isArray(saved.ui_events) ? saved.ui_events : [];
     // Совместимость
     if (!Array.isArray(state.relationships)) state.relationships = [];
     if (!Array.isArray(state.faction_clocks)) state.faction_clocks = [];
@@ -1684,7 +2134,6 @@ function init() {
     if (!Array.isArray(state.abilities)) state.abilities = [];
     if (!Array.isArray(state.level_history)) state.level_history = [];
     if (!Array.isArray(state.xp_event_ids)) state.xp_event_ids = [];
-    // Historical saves do not have xp_scored_through; server migrates them safely.
     if (typeof state.level_pending !== 'number') state.level_pending = 0;
     if (!Array.isArray(state.notes)) state.notes = [];
     if (typeof state.dc_modifier !== 'number') state.dc_modifier = 0;
@@ -1709,13 +2158,13 @@ function init() {
     }
     renderAll(); renderStatus();
     addMsg('system', '↩ История восстановлена. Продолжайте.');
+    await updateMemory();
   } else {
     state = {...EMPTY_STATE};
     renderStatus();
     showIntro();
   }
   renderWorlds();
-  refreshQuota();
   ttsLoad();
   autosize();
 }
