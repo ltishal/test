@@ -36,25 +36,15 @@
   }
   .status-row { display: flex; align-items: center; gap: 10px; }
   .status-top { display: flex; align-items: center; gap: 12px; }
-  .avatar-wrap {
-    width: 48px; height: 48px; border-radius: 50%; overflow: hidden;
-    border: 2px solid var(--accent-gold); background: var(--bg-card);
-    flex-shrink: 0; position: relative; cursor: pointer;
-    display: flex; align-items: center; justify-content: center;
-    transition: transform 0.2s;
+  .identity {
+    flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 3px;
+    padding-left: 12px; border-left: 3px solid var(--accent-gold);
   }
-  .avatar-wrap:active { transform: scale(0.95); }
-  .avatar-wrap img { width: 100%; height: 100%; object-fit: cover; display: block; }
-  .avatar-placeholder { color: var(--accent-gold); font-size: 20px; font-family: var(--font-serif); font-weight: bold; }
-  .avatar-wrap.loading::after {
-    content: ''; position: absolute; inset: 0;
-    border: 2px solid transparent; border-top-color: var(--accent-gold);
-    border-radius: 50%; animation: spin 0.8s linear infinite;
+  .identity-name {
+    font-weight: 700; color: var(--accent-gold); font-family: var(--font-serif);
+    font-size: 19px; line-height: 1.2; word-break: break-word;
   }
-  @keyframes spin { to { transform: rotate(360deg); } }
-  .status-info { flex: 1; display: flex; flex-direction: column; gap: 4px; }
-  .status-name { font-weight: 700; color: var(--accent-gold); font-family: var(--font-serif); font-size: 15px; }
-  .status-sub { font-size: 11px; color: var(--text-secondary); margin-top: -2px; }
+  .identity-sub { font-size: 12px; color: var(--text-secondary); }
   .status-chips { display: flex; gap: 6px; flex-wrap: wrap; }
   .status-chip {
     background: var(--bg-card); padding: 2px 8px; border-radius: 6px;
@@ -208,7 +198,6 @@
   .stat-box .lbl { font-size: 11px; color: var(--text-secondary); text-transform: uppercase; letter-spacing: 0.5px; }
   .stat-box .val { font-size: 18px; font-weight: 700; color: var(--accent-gold); margin-top: 4px; font-family: var(--font-serif); }
   .stat-box .mod { font-size: 11px; color: var(--text-secondary); margin-top: 2px; font-family: monospace; }
-  .avatar-large { display: block; margin: 0 auto; width: 220px; height: 220px; border-radius: 50%; border: 3px solid var(--accent-gold); object-fit: cover; background: var(--bg-deep); }
   .dc-box { background: var(--bg-card); border: 1px solid var(--border-subtle); border-radius: 8px; padding: 10px; margin-top: 8px; }
   .dc-box.up { border-color: #5a3a2a; }
   .dc-box.down { border-color: #2a4a2a; }
@@ -285,6 +274,38 @@
     padding: 3px 8px; font-size: 11px; cursor: pointer;
   }
   .note-action-btn:active { background: var(--bg-deep); }
+  /* Сохранения */
+  .save-row {
+    display: flex; align-items: center; gap: 8px;
+    padding: 10px 12px; background: var(--bg-card);
+    border: 1px solid var(--border-subtle); border-radius: 8px;
+  }
+  .save-row .save-col { flex: 1; min-width: 0; }
+  .save-row .save-name {
+    cursor: pointer; font-size: 14px; color: var(--text-primary);
+    word-break: break-all;
+  }
+  .save-row .save-name:hover { color: var(--accent-gold); }
+  .save-row .save-meta { font-size: 11px; color: var(--text-secondary); margin-top: 2px; }
+  .save-row .note-action-btn { flex-shrink: 0; }
+  .save-note {
+    font-size: 12px; color: var(--accent-gold);
+    background: var(--bg-deep); border: 1px solid var(--border-subtle);
+    border-radius: 6px; padding: 6px 10px;
+  }
+  /* Перенос партии */
+  .transfer-area {
+    width: 100%; height: 150px; background: var(--bg-deep);
+    color: var(--text-primary); border: 1px solid var(--border-subtle);
+    border-radius: 8px; padding: 10px; font: 12px monospace;
+    resize: vertical; outline: none;
+  }
+  .transfer-area:focus { border-color: var(--accent-gold); }
+  .transfer-hint { font-size: 12px; color: var(--text-secondary); line-height: 1.5; }
+  .transfer-info { font-size: 11px; color: var(--text-secondary); }
+  .transfer-info.warn { color: #d45a5a; }
+  .transfer-row { display: flex; gap: 6px; }
+  .transfer-row .btn { flex: 1; }
 </style>
 </head>
 <body>
@@ -341,6 +362,7 @@
   <div class="drawer-section">
     <button class="btn" data-action="save">💾 Сохранить</button>
     <button class="btn" data-action="load">📂 Загрузить</button>
+    <button class="btn" data-action="transfer">🔄 Перенос партии</button>
     <button class="btn" data-action="reset">✨ Новая игра</button>
     <button class="btn" data-action="help">❓ Справка</button>
   </div>
@@ -360,8 +382,46 @@ const modalContent = document.getElementById('modal-content');
 const statusEl = document.getElementById('status');
 
 const LS_KEY = 'rpg_session_v9';
-const AVATAR_KEY = 'rpg_avatar_v1';
 const TTS_KEY = 'rpg_tts_v1';
+
+/* ═══════════ ИДЕНТИФИКАТОРЫ ═══════════
+   clientId — постоянный для устройства: разделяет сохранения игроков.
+   sessionId — на одну партию: к нему на сервере привязано резюме прошлого.
+   Оба уходят заголовками во все запросы /api/. */
+
+const CLIENT_ID = (() => {
+  let id = localStorage.getItem('rpg_client_id');
+  if (!id) {
+    id = 'c' + Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
+    localStorage.setItem('rpg_client_id', id);
+  }
+  return id;
+})();
+
+function newSessionId() {
+  return 's' + Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
+}
+let SESSION_ID = localStorage.getItem('rpg_session_id') || newSessionId();
+localStorage.setItem('rpg_session_id', SESSION_ID);
+function resetSession() {
+  SESSION_ID = newSessionId();
+  localStorage.setItem('rpg_session_id', SESSION_ID);
+}
+
+(function () {
+  const orig = window.fetch.bind(window);
+  window.fetch = function (url, opts) {
+    const u = typeof url === 'string' ? url : (url && url.url) || '';
+    if (u.startsWith('/api/')) {
+      opts = Object.assign({}, opts || {});
+      const h = Object.assign({}, opts.headers || {});
+      h['X-Client-Id'] = CLIENT_ID;
+      h['X-Session-Id'] = SESSION_ID;
+      opts.headers = h;
+    }
+    return orig(url, opts);
+  };
+})();
 
 const EMPTY_STATE = {
   name:"Пустой", race:"", class:"", background:"",
@@ -430,103 +490,7 @@ const COVER_LABELS = {
 function getPositionInfo(pos) { return POSITION_LABELS[pos] || { icon: '❔', label: pos || '—', mod: 0 }; }
 function getCoverInfo(cov) { return COVER_LABELS[cov] || { icon: '', label: cov || '—', mod: 0 }; }
 
-/* AVATAR */
-function detectArchetype(st) {
-  const s = st.stats || {};
-  const cls = (st.class || '').toLowerCase();
-  const clsMap = {
-    'воин': 'warrior knight fighter', 'варвар': 'barbarian berserker',
-    'паладин': 'paladin knight holy', 'плут': 'rogue assassin thief',
-    'следопыт': 'ranger archer hunter', 'монах': 'monk martial artist',
-    'маг': 'wizard mage sorcerer', 'жрец': 'cleric priest',
-    'друид': 'druid nature shaman', 'бард': 'bard musician',
-    'колдун': 'warlock dark mage', 'чародей': 'sorcerer magic'
-  };
-  for (const key in clsMap) { if (cls.includes(key)) return clsMap[key]; }
-  const values = [['str','warrior knight'],['dex','rogue thief'],['int','wizard mage'],['wis','cleric druid'],['cha','bard warlock']];
-  let best = ['str', 'adventurer'], maxVal = -1;
-  for (const [k, role] of values) {
-    if ((s[k] || 10) > maxVal) { maxVal = s[k] || 10; best = [k, role]; }
-  }
-  return best[1];
-}
-function buildAvatarPrompt(st) {
-  const archetype = detectArchetype(st);
-  const conditions = (st.conditions || []).join(', ');
-  const race = st.race ? st.race + ' ' : '';
-  const name = st.name || 'Adventurer';
-  return `Fantasy RPG character portrait of ${name}, ${race}${archetype}, level ${st.level}, detailed digital painting, dramatic lighting, dark atmospheric background, painterly style, high quality, centered composition${conditions ? ', ' + conditions : ''}`;
-}
-function cachedAvatarFor(name) {
-  try {
-    const raw = localStorage.getItem(AVATAR_KEY);
-    if (!raw) return null;
-    const data = JSON.parse(raw);
-    if (data.name === name && data.url) return data;
-  } catch(e){}
-  return null;
-}
-function saveAvatar(name, url) {
-  try { localStorage.setItem(AVATAR_KEY, JSON.stringify({name, url})); } catch(e){}
-}
-function generateAvatar(force) {
-  if (!state || !state.name || state.name === 'Пустой') return;
-  const wrap = document.querySelector('.avatar-wrap');
-  if (!wrap) return;
-  if (!force) {
-    const cached = cachedAvatarFor(state.name);
-    if (cached) { wrap.innerHTML = `<img src="${cached.url}" alt="${esc(state.name)}">`; return; }
-  }
-  wrap.innerHTML = '<div class="avatar-placeholder">?</div>';
-  wrap.classList.add('loading');
-  const prompt = buildAvatarPrompt(state);
-  const seed = Math.floor(Math.random() * 999999);
-  const url = `https://image.pollinations.ai/prompt/${encodeURIComponent(prompt)}?width=256&height=256&seed=${seed}&nologo=true&model=flux&enhance=true`;
-  const img = new Image();
-  img.crossOrigin = 'anonymous';
-  img.onload = () => {
-    wrap.classList.remove('loading');
-    wrap.innerHTML = `<img src="${url}" alt="${esc(state.name)}">`;
-    saveAvatar(state.name, url);
-  };
-  img.onerror = () => {
-    const fallback = `https://api.dicebear.com/7.x/adventurer/svg?seed=${encodeURIComponent(state.name)}&backgroundColor=24201d&radius=50`;
-    wrap.classList.remove('loading');
-    wrap.innerHTML = `<img src="${fallback}" alt="${esc(state.name)}">`;
-    saveAvatar(state.name, fallback);
-  };
-  img.src = url;
-}
-function maybeGenerateAvatar() {
-  if (!state || !state.name || state.name === 'Пустой') return;
-  const cached = cachedAvatarFor(state.name);
-  const wrap = document.querySelector('.avatar-wrap');
-  if (!wrap) return;
-  if (cached) { wrap.innerHTML = `<img src="${cached.url}" alt="${esc(state.name)}">`; }
-  else { generateAvatar(false); }
-}
-function openAvatarModal() {
-  if (!state || !state.name || state.name === 'Пустой') {
-    addMsg('system', 'Имя персонажа ещё не определено. Сыграйте пару ходов.');
-    return;
-  }
-  const cached = cachedAvatarFor(state.name);
-  const imgSrc = cached ? cached.url : '';
-  modalContent.innerHTML = `
-    <h3>🖼 Портрет: ${esc(state.name)}</h3>
-    ${imgSrc ? `<img class="avatar-large" src="${imgSrc}" alt="${esc(state.name)}">` : `<div style="text-align:center;padding:20px;color:var(--text-secondary)">Портрет ещё не сгенерирован</div>`}
-    <button class="btn primary" id="regen-avatar">⟳ Сгенерировать заново</button>
-    <button class="btn" onclick="document.getElementById('modal').classList.remove('open')">Закрыть</button>
-  `;
-  modalEl.classList.add('open');
-  document.getElementById('regen-avatar').onclick = () => {
-    localStorage.removeItem(AVATAR_KEY);
-    modalEl.classList.remove('open');
-    generateAvatar(true);
-  };
-}
-
-/* TTS */
+/* ═══════════ TTS ═══════════ */
 const tts = {
   enabled: false, voice: null, rate: 1.0, speaking: false,
   lastText: '', available: ('speechSynthesis' in window)
@@ -564,7 +528,7 @@ function ttsClean(text) {
   return text
     .replace(/\[\[.*?\]\]/g, '').replace(/\[.*?\]/g, '')
     .replace(/\*+.*?\*+/g, '')
-    .replace(/[🎲🔊🔈⏩⏹🎙🖼📜💾📂✨❓🌍🔍🚶🗣⚔🛌🎒🎯🧍🪑🧎🐎🏊🪜🤝⛓🛡⭐📈✓✗●▶○🎁🏛👤📝✉🔔💬📔]/g, '')
+    .replace(/[🎲🔊🔈⏩⏹🎙🖼📜💾📂✨❓🌍🔍🚶🗣⚔🛌🎒🎯🧍🪑🧎🐎🏊🪜🤝⛓🛡⭐📈✓✗●▶○🎁🏛👤📝✉🔔💬📔🔄📤📥📋✅📁]/g, '')
     .replace(/https?:\/\/\S+/g, '')
     .replace(/[\u{1F000}-\u{1FAFF}]/gu, '')
     .replace(/\s+/g, ' ').trim();
@@ -713,24 +677,22 @@ function renderStatus() {
     ? `<span class="status-chip cover">${covInfo.icon} ${esc(covInfo.label)}</span>` : '';
   const restrChip = state.restrained
     ? `<span class="status-chip dc-up">⛓ Связан</span>` : '';
+
   statusEl.innerHTML = `
     <div class="status-top">
-      <div class="avatar-wrap" title="Нажмите, чтобы увидеть портрет">
-        <div class="avatar-placeholder">?</div>
+      <div class="identity">
+        <div class="identity-name">${esc(state.name || 'Пустой')}</div>
+        <div class="identity-sub">${esc(raceClass || 'раса и класс пока не определены')}</div>
       </div>
-      <div class="status-info">
-        <div class="status-name">${esc(state.name || 'Пустой')}</div>
-        ${raceClass ? `<div class="status-sub">${esc(raceClass)}</div>` : ''}
-        <div class="status-chips">
-          <span class="status-chip">Ур. ${state.level}</span>
-          ${state.level_pending ? `<span class="status-chip" title="Обсуди повышение с мастером">⬆ Повышение!</span>` : ''}
-          <span class="status-chip">💰 ${state.gold}</span>
-          ${posChip}
-          ${covChip}
-          ${restrChip}
-          ${dcChip}
-        </div>
-      </div>
+    </div>
+    <div class="status-chips">
+      <span class="status-chip">Ур. ${state.level}</span>
+      ${state.level_pending ? `<span class="status-chip" title="Обсуди повышение с мастером">⬆ Повышение!</span>` : ''}
+      <span class="status-chip">💰 ${state.gold}</span>
+      ${posChip}
+      ${covChip}
+      ${restrChip}
+      ${dcChip}
     </div>
     <div class="status-row"><span style="color:#d45a5a;font-size:11px;width:20px">HP</span>
       <div class="bar-wrap"><div class="bar-fill bar-hp" style="width:${hpPct}%"></div></div>
@@ -739,9 +701,7 @@ function renderStatus() {
       <div class="bar-wrap"><div class="bar-fill bar-xp" style="width:${xpPct}%"></div></div>
       <span class="bar-label">${state.xp}/${state.xp_next}</span></div>
     ${c ? `<div class="status-row" style="font-size:12px;color:var(--text-secondary)">${c}</div>` : ''}`;
-  const wrap = statusEl.querySelector('.avatar-wrap');
-  if (wrap) wrap.onclick = openAvatarModal;
-  maybeGenerateAvatar();
+
   updateNotesBadge();
 }
 
@@ -799,7 +759,7 @@ async function callAI(msgs) {
     while (true) {
       const {done, value} = await reader.read();
       if (done) break;
-      const c = dec.decode(value, { stream: true});
+      const c = dec.decode(value, {stream: true});
       if (!c) continue;
       full += c; md.textContent = full; scrollBottom();
     }
@@ -876,6 +836,7 @@ function handleCommand(cmd, arg) {
     case '/notes': return doNotes();
     case '/save': return doSave(arg);
     case '/load': return doLoad(arg);
+    case '/transfer': return doTransfer();
     case '/reset': return doReset();
     case '/help': return doHelp();
     default: addMsg('system', `Неизвестная команда: ${cmd}. Введите /help.`);
@@ -1008,16 +969,11 @@ async function doSheet() {
     const m = Math.floor((val - 10) / 2);
     return m >= 0 ? '+' + m : '' + m;
   };
-  const cached = cachedAvatarFor(state.name);
-  const avatar = cached
-    ? `<img class="avatar-large" src="${cached.url}" alt="${esc(state.name)}" style="width:140px;height:140px">`
-    : '';
 
   const notesCount = (state.notes || []).length;
   const notesUnread = (state.notes || []).filter(n => n.unread).length;
 
   modalContent.innerHTML = `
-    ${avatar}
     <h3>📜 ${esc(state.name || 'Пустой')}</h3>
     ${state.race || state.class ? `<div class="kv"><span class="k">Раса · Класс</span><span class="v">${esc(state.race || '—')} · ${esc(state.class || '—')}</span></div>` : ''}
     ${state.background ? `<div class="kv"><span class="k">Предыстория</span><span class="v">${esc(state.background)}</span></div>` : ''}
@@ -1209,12 +1165,43 @@ async function doSkills() {
   modalEl.classList.add('open');
 }
 
-/* SAVE / LOAD / RESET / HELP */
+/* ═══════════ СОХРАНЕНИЯ ═══════════ */
+
+function fmtTime(ts) {
+  if (!ts) return 'время неизвестно';
+  const d = new Date(ts * 1000);
+  if (isNaN(d.getTime())) return 'время неизвестно';
+  const now = new Date();
+  const time = d.toLocaleTimeString('ru-RU', {hour: '2-digit', minute: '2-digit'});
+  if (d.toDateString() === now.toDateString()) return 'сегодня, ' + time;
+  const yest = new Date(now);
+  yest.setDate(now.getDate() - 1);
+  if (d.toDateString() === yest.toDateString()) return 'вчера, ' + time;
+  return d.toLocaleDateString('ru-RU', {day: '2-digit', month: '2-digit', year: 'numeric'})
+         + ', ' + time;
+}
+
+function fmtSize(bytes) {
+  if (!bytes && bytes !== 0) return '';
+  if (bytes < 1024) return bytes + ' Б';
+  if (bytes < 1024 * 1024) return Math.round(bytes / 1024) + ' КБ';
+  return (bytes / 1024 / 1024).toFixed(1) + ' МБ';
+}
+
 async function doSave(name) {
   if (!name) {
     name = await promptModal('Название сохранения', 'game-' + Date.now());
     if (!name) return;
   }
+  // Если имя занято — спросим. Прежняя версия останется в .bak.json
+  try {
+    const r = await fetch('/api/saves');
+    const list = await r.json();
+    if (Array.isArray(list) && list.some(s => s.name === name)) {
+      if (!confirm(`Сохранение «${name}» уже есть. Перезаписать?`)) return;
+    }
+  } catch (e) { /* список недоступен — просто сохраняем */ }
+
   try {
     const res = await fetch('/api/save', {
       method: 'POST', headers: {'Content-Type': 'application/json'},
@@ -1226,13 +1213,90 @@ async function doSave(name) {
     addMsg('system', `💾 Сохранено: «${d.name}»`);
   } catch(e) { addMsg('system', 'Ошибка сохранения: ' + e.message); }
 }
+
+/* Список сохранений: клик по имени — загрузить, ✎ — переименовать, 🗑 — удалить.
+   Промис разрешается именем выбранного сохранения либо null. */
+function savesModal() {
+  return new Promise(resolve => {
+    let items = [];
+    let note = '';
+    let closed = false;
+
+    const finish = v => { if (!closed) { closed = true; modalEl.classList.remove('open'); resolve(v); } };
+
+    async function refresh() {
+      try {
+        const r = await fetch('/api/saves');
+        const d = await r.json();
+        items = Array.isArray(d) ? d : [];
+      } catch (e) { items = []; }
+      render();
+    }
+
+    function render() {
+      const rows = items.length ? items.map(s => `
+        <div class="save-row">
+          <div class="save-col">
+            <div class="save-name" data-name="${esc(s.name)}" title="Нажмите, чтобы загрузить">${esc(s.name)}</div>
+            <div class="save-meta">${esc(fmtTime(s.saved_at))}${s.size ? ' · ' + esc(fmtSize(s.size)) : ''}</div>
+          </div>
+          <button class="note-action-btn" data-act="rename" data-name="${esc(s.name)}" title="Переименовать">✎</button>
+          <button class="note-action-btn" data-act="delete" data-name="${esc(s.name)}" title="Удалить">🗑</button>
+        </div>`).join('') : '<div class="tag empty">нет сохранений</div>';
+
+      modalContent.innerHTML = `
+        <h3>📂 Сохранения</h3>
+        ${note ? `<div class="save-note">${esc(note)}</div>` : ''}
+        <div style="display:flex;flex-direction:column;gap:8px;max-height:55vh;overflow-y:auto">${rows}</div>
+        <button class="btn primary" id="modal-cancel">Закрыть</button>`;
+      modalEl.classList.add('open');
+
+      modalContent.querySelectorAll('.save-name').forEach(el => {
+        el.onclick = () => finish(el.dataset.name);
+      });
+
+      modalContent.querySelectorAll('[data-act]').forEach(btn => {
+        btn.onclick = async (e) => {
+          e.stopPropagation();
+          const nm = btn.dataset.name;
+          if (btn.dataset.act === 'rename') {
+            const nn = await promptModal('Новое имя', nm);
+            if (!nn || nn === nm) { note = ''; render(); return; }
+            try {
+              const r = await fetch('/api/save/rename', {
+                method: 'POST', headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({name: nm, new_name: nn})
+              });
+              const d = await r.json().catch(() => ({}));
+              note = d.ok ? `Переименовано: «${nm}» → «${nn}»`
+                          : 'Не удалось переименовать: ' + (d.error || ('HTTP ' + r.status));
+            } catch (err) { note = 'Не удалось переименовать: ' + err.message; }
+          } else {
+            if (!confirm(`Удалить сохранение «${nm}»?\n\nЭто необратимо.`)) { note = ''; render(); return; }
+            try {
+              const r = await fetch('/api/save/delete', {
+                method: 'POST', headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({name: nm})
+              });
+              const d = await r.json().catch(() => ({}));
+              note = d.ok ? `Удалено: «${nm}»`
+                          : 'Не удалось удалить: ' + (d.error || ('HTTP ' + r.status));
+            } catch (err) { note = 'Не удалось удалить: ' + err.message; }
+          }
+          await refresh();
+        };
+      });
+
+      document.getElementById('modal-cancel').onclick = () => finish(null);
+    }
+
+    refresh();
+  });
+}
+
 async function doLoad(name) {
-  let saves;
-  try { saves = await (await fetch('/api/saves')).json(); }
-  catch(e) { addMsg('system', 'Ошибка: ' + e.message); return; }
-  if (!saves.length) { addMsg('system', 'Нет сохранений.'); return; }
   if (!name) {
-    name = await listModal('Выберите сохранение', saves);
+    name = await savesModal();
     if (!name) return;
   }
   try {
@@ -1241,26 +1305,166 @@ async function doLoad(name) {
     const d = await res.json();
     messages = d.messages || [];
     state = d.state || {...EMPTY_STATE};
+    resetSession();                 // резюме прежней партии больше не актуально
     persist(); renderAll(); renderStatus();
     addMsg('system', `📂 Загружено: «${name}»`);
   } catch(e) { addMsg('system', 'Ошибка: ' + e.message); }
 }
+
+/* ═══════════ ПЕРЕНОС ПАРТИИ ═══════════
+   Переносит партию между браузерами и устройствами обычным текстом.
+   Во встроенных браузерах (Telegram, Instagram) нет ни консоли,
+   ни закладок, ни букмарклетов — а копирование текста работает везде.
+
+   Переносятся обе части партии:
+     messages — вся история ходов и ответов мастера
+     state    — персонаж: имя, раса, класс, уровень, XP, HP,
+                инвентарь, заметки, квесты, отношения. */
+
+function doTransfer() {
+  const current = JSON.stringify({messages, state});
+  const charName = (state && state.name) || 'Пустой';
+
+  modalContent.innerHTML = `
+    <h3>🔄 Перенос партии</h3>
+    <div class="transfer-hint">
+      <b>Сохранить копию:</b> нажмите «Скопировать» и вставьте текст в Заметки
+      или отправьте себе в «Избранное».<br>
+      <b>Загрузить:</b> вставьте текст в поле (или возьмите файл) и нажмите «Применить».
+    </div>
+    <textarea id="transfer-area" class="transfer-area" spellcheck="false"></textarea>
+    <div id="transfer-info" class="transfer-info"></div>
+    <div class="transfer-row">
+      <button class="btn" id="transfer-copy">📋 Скопировать</button>
+      <button class="btn" id="transfer-download">💾 Скачать файл</button>
+    </div>
+    <div class="transfer-row">
+      <button class="btn" id="transfer-file-btn">📁 Из файла</button>
+      <button class="btn primary" id="transfer-apply">✅ Применить</button>
+    </div>
+    <input type="file" id="transfer-file" accept=".json,application/json" style="display:none">
+    <button class="btn" id="transfer-close">Закрыть</button>`;
+
+  const area = document.getElementById('transfer-area');
+  const info = document.getElementById('transfer-info');
+  const fileInput = document.getElementById('transfer-file');
+  area.value = current;
+
+  const showInfo = (msg, warn) => {
+    if (msg) {
+      info.textContent = msg;
+      info.className = 'transfer-info' + (warn ? ' warn' : '');
+      return;
+    }
+    const kb = Math.max(1, Math.round(area.value.length / 1024));
+    info.textContent =
+      `В поле: ${kb} КБ. Текущая партия: сообщений ${messages.length}, ` +
+      `персонаж «${charName}».`;
+    info.className = 'transfer-info';
+  };
+  showInfo();
+  area.addEventListener('input', () => showInfo());
+
+  document.getElementById('transfer-close').onclick = () =>
+    modalEl.classList.remove('open');
+
+  document.getElementById('transfer-copy').onclick = async () => {
+    const btn = document.getElementById('transfer-copy');
+    area.focus();
+    area.select();
+    let ok = false;
+    try {
+      if (navigator.clipboard && window.isSecureContext) {
+        await navigator.clipboard.writeText(area.value);
+        ok = true;
+      }
+    } catch (e) {}
+    if (!ok) { try { ok = document.execCommand('copy'); } catch (e) {} }
+    btn.textContent = ok ? '✓ Скопировано' : 'Скопируйте вручную';
+    setTimeout(() => { btn.textContent = '📋 Скопировать'; }, 2000);
+  };
+
+  document.getElementById('transfer-download').onclick = () => {
+    const stamp = new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-');
+    const blob = new Blob([area.value], {type: 'application/json'});
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = `rpg-${charName}-${stamp}.json`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    setTimeout(() => URL.revokeObjectURL(a.href), 5000);
+  };
+
+  document.getElementById('transfer-file-btn').onclick = () => fileInput.click();
+
+  fileInput.onchange = () => {
+    const f = fileInput.files && fileInput.files[0];
+    if (!f) return;
+    const reader = new FileReader();
+    reader.onload = () => { area.value = String(reader.result || ''); showInfo(); };
+    reader.readAsText(f);
+  };
+
+  document.getElementById('transfer-apply').onclick = () => {
+    const raw = area.value.trim();
+    if (!raw) { showInfo('Поле пустое.', true); return; }
+    if (raw === current) { showInfo('Это ваша текущая партия — менять нечего.'); return; }
+
+    let d;
+    try {
+      d = JSON.parse(raw);
+    } catch (e) {
+      showInfo('Текст повреждён или скопирован не полностью.', true);
+      return;
+    }
+    if (!d || !Array.isArray(d.messages)) {
+      showInfo('Это не похоже на партию: нет списка сообщений.', true);
+      return;
+    }
+    const nm = (d.state && d.state.name) || 'Пустой';
+    const lvl = (d.state && d.state.level) || 1;
+    if (!confirm(`Заменить текущую партию?\n\n` +
+                 `Загружаемая: «${nm}», уровень ${lvl}, сообщений ${d.messages.length}.\n` +
+                 `Текущая партия будет потеряна.`)) return;
+
+    messages = d.messages;
+    state = d.state || {...EMPTY_STATE};
+    resetSession();
+    persist();
+    chatEl.innerHTML = '';
+    renderAll();
+    renderStatus();
+    modalEl.classList.remove('open');
+    addMsg('system',
+      `🔄 Партия загружена: «${state.name || 'Пустой'}», уровень ${state.level || 1}, ` +
+      `сообщений ${messages.length}. Нажмите «💾 Сохранить», чтобы она попала на сервер.`);
+  };
+
+  modalEl.classList.add('open');
+}
+
 function doReset() {
-  if (!confirm('Начать новую игру? Текущая история будет потеряна.')) return;
+  if (!confirm('Начать новую игру? Текущая история будет потеряна.\n\n' +
+               'Совет: сначала сделайте «🔄 Перенос партии» → «Скопировать».')) return;
   messages = []; state = {...EMPTY_STATE};
-  try { localStorage.removeItem(AVATAR_KEY); } catch(e){}
+  resetSession();
   ttsStop();
   persist(); chatEl.innerHTML = ''; renderStatus(); showIntro();
 }
+
 function doHelp() {
   addHtmlMsg('system', 'Команды:<br><code>/roll 1d20+3</code> — бросок<br>' +
     '<code>/sheet</code> — полный лист<br><code>/skills</code> — умения и навыки<br>' +
     '<code>/notes</code> — заметки, письма, документы<br>' +
     '<code>/save имя</code> — сохранить<br><code>/load имя</code> — загрузить<br>' +
-    '<code>/reset</code> — новая игра<br><br>' +
+    '<code>/transfer</code> — перенос партии<br><code>/reset</code> — новая игра<br><br>' +
     'Заметки, письма, документы, слухи — в отдельной вкладке 📝, не в инвентаре.<br>' +
-    'XP начисляется за убийства, победы без убийства и завершённые квесты.');
+    'XP начисляется за убийства, победы без убийства и завершённые квесты.<br>' +
+    'В окне загрузки можно переименовать (✎) и удалить (🗑) сохранение.<br>' +
+    '🔄 Перенос партии — чтобы продолжить игру в другом браузере или на другом устройстве.');
 }
+
 function renderAll() {
   chatEl.innerHTML = '';
   messages.forEach(m => {
@@ -1293,7 +1497,7 @@ function renderWorlds() {
       drawerEl.classList.remove('open');
       drawerBg.classList.remove('open');
       messages = []; state = {...EMPTY_STATE};
-      try { localStorage.removeItem(AVATAR_KEY); } catch(e){}
+      resetSession();
       ttsStop();
       chatEl.innerHTML = '';
       renderStatus();
@@ -1360,20 +1564,7 @@ function promptModal(title, ph) {
     };
   });
 }
-function listModal(title, items) {
-  return new Promise(res => {
-    modalContent.innerHTML = `<h3>${title}</h3>
-      <div style="display:flex;flex-direction:column;gap:8px">
-        ${items.map(i => `<div class="save-item" data-name="${esc(i)}">${esc(i)}</div>`).join('')}
-      </div>
-      <button class="btn" id="modal-cancel">Закрыть</button>`;
-    modalEl.classList.add('open');
-    const close = v => { modalEl.classList.remove('open'); res(v); };
-    modalContent.querySelectorAll('.save-item').forEach(el =>
-      el.onclick = () => close(el.dataset.name));
-    document.getElementById('modal-cancel').onclick = () => close(null);
-  });
-}
+
 function autosize() {
   inputEl.style.height = 'auto';
   inputEl.style.height = Math.min(inputEl.scrollHeight, 120) + 'px';
@@ -1429,6 +1620,7 @@ document.querySelectorAll('#drawer .btn[data-action]').forEach(btn => {
     else if (a === 'notes') doNotes();
     else if (a === 'save') doSave();
     else if (a === 'load') doLoad();
+    else if (a === 'transfer') doTransfer();
     else if (a === 'reset') doReset();
     else if (a === 'help') doHelp();
   };
@@ -1485,4 +1677,3 @@ init();
 </script>
 </body>
 </html>
-
