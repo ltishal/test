@@ -4,9 +4,15 @@ import json
 import random
 import hashlib
 import tempfile
+import threading
+from contextlib import contextmanager
 from pathlib import Path
 
-from flask import Flask, request, jsonify, Response, render_template
+from dotenv import load_dotenv
+load_dotenv(Path(__file__).with_name(".env"))
+
+from flask import (Flask, request, jsonify, Response, render_template,
+                   send_from_directory)
 from openai import OpenAI
 
 app = Flask(__name__)
@@ -24,12 +30,49 @@ if BASE_URL:
 else:
     client = OpenAI(api_key=API_KEY)
 
+# Служебные вызовы (извлечение состояния, резюме) можно увести на модель полегче.
+# Пусто → используется MODEL.
+EXTRACT_MODEL = os.getenv("EXTRACT_MODEL") or MODEL
+SUMMARY_MODEL = os.getenv("SUMMARY_MODEL") or MODEL
+
 BASE_DIR = Path(__file__).resolve().parent
 SAVES_DIR = BASE_DIR / "saves"
 SAVES_DIR.mkdir(exist_ok=True)
 
 FREQ_PENALTY = float(os.getenv("OPENAI_FREQ_PENALTY", "0.35"))
 PRES_PENALTY = float(os.getenv("OPENAI_PRES_PENALTY", "0.25"))
+
+# ─── Лимит параллельных обращений к модели ─────────────────────────────────
+# Главное узкое место при нескольких игроках. Ставьте ровно столько, сколько
+# выдерживает ваш бэкенд (для Ollama — OLLAMA_NUM_PARALLEL).
+LLM_MAX_CONCURRENT = max(1, int(os.getenv("LLM_MAX_CONCURRENT", "2")))
+LLM_QUEUE_TIMEOUT = float(os.getenv("LLM_QUEUE_TIMEOUT", "120"))
+LLM_SEM = threading.BoundedSemaphore(LLM_MAX_CONCURRENT)
+
+
+@contextmanager
+def llm_slot(timeout=None):
+    """Контекст, дающий слот на обращение к модели.
+
+    yield True  — слот получен;
+    yield False — очередь переполнена, обращаться не надо.
+    """
+    ok = LLM_SEM.acquire(timeout=LLM_QUEUE_TIMEOUT if timeout is None else timeout)
+    try:
+        yield ok
+    finally:
+        if ok:
+            LLM_SEM.release()
+
+
+def _header_token(name, limit):
+    """Безопасное значение заголовка: только буквы, цифры, дефис и подчёркивание."""
+    return re.sub(r"[^a-zA-Z0-9_-]", "", request.headers.get(name, ""))[:limit]
+
+
+def _client_id():
+    """Идентификатор устройства игрока. Разделяет сохранения между людьми."""
+    return _header_token("X-Client-Id", 32) or "shared"
 
 
 SYSTEM_PROMPT = """
@@ -243,7 +286,7 @@ XP ЗА УБИЙСТВО ПРОТИВНИКА (по силе):
 ПОЛОЖЕНИЕ ТЕЛА: лежит +3 (ближняя), +5 (подъём); плавает/висит +3; схвачен +5; обездвижен — автопровал.
 УКРЫТИЕ (для цели, по которой бьют): половинное +2, 3/4 +5, полное — невозможно.
 РУКИ: обе заняты +2 на действия со свободной рукой.
-СОСТОЯНИЕ: темнота +3, слепота +5, ранение +2, крит. +3, отравлен +2, испуг +2, спешка +2, местность +1..+2.
+СОСТОЯНИЕ: темнота +3, слепота +5, ранение +2, крит. +3, отравлен +2, испуган +2, спешка +2, местность +1..+2.
 ПОМОЩЬ: союзник −2, подготовка −2..−3, знакомое −1..−2.
 
 СВЯЗАННЫЕ ДЕЙСТВИЯ:
@@ -403,41 +446,105 @@ DEFAULT_STATE = {
     "level_history": [], "xp_event_ids": [], "level_pending": 0
 }
 
+# Что уходит модели в промпте чата. Заметки, квесты и история уровней
+# остаются в диалоге и в отдельном листе — в каждый запрос их не шлём.
+STATE_FIELDS = ("name", "race", "class", "background", "level", "xp", "xp_next",
+                "hp", "max_hp", "gold", "stats", "conditions", "position",
+                "cover", "weapon_in_hand", "restrained")
+STATE_NOTE = ("[АКТУАЛЬНОЕ СОСТОЯНИЕ ПЕРСОНАЖА — справочная информация, "
+              "не меняй числа без игрового события]\n")
+
 
 MAX_MESSAGES_BEFORE_SUMMARY = 24
 KEEP_RECENT = 10
+SUMMARY_MAX_SESSIONS = int(os.getenv("SUMMARY_MAX_SESSIONS", "128"))
+
+# Резюме прошлого живёт на сервере, по session_id. Клиент его не хранит
+# и не присылает — иначе оно пересчитывалось бы каждый ход.
+_SUMMARY_STATE = {}
+_SUMMARY_LOCK = threading.Lock()
 
 
-def summarize_old_messages(messages):
-    """Rolling summary: retain one summary and a bounded recent dialogue window."""
+def _summary_get(sid):
+    with _SUMMARY_LOCK:
+        st = _SUMMARY_STATE.get(sid)
+        return dict(st) if st else {"text": "", "folded": 0}
+
+
+def _summary_put(sid, text, folded):
+    with _SUMMARY_LOCK:
+        if sid not in _SUMMARY_STATE and len(_SUMMARY_STATE) >= SUMMARY_MAX_SESSIONS:
+            _SUMMARY_STATE.pop(next(iter(_SUMMARY_STATE)))
+        _SUMMARY_STATE[sid] = {"text": text, "folded": folded}
+
+
+def summarize_old_messages(messages, session_id=""):
+    """Сворачивает старую часть диалога в одно резюме.
+
+    Резюме хранится по session_id и обновляется инкрементально: за ход
+    досжимается только прирост, вышедший за окно KEEP_RECENT. Без session_id
+    резюме не запоминается между запросами.
+    """
     if not isinstance(messages, list):
         return messages
+
     system_messages = [m for m in messages if m.get("role") == "system"]
     dialogue = [m for m in messages if m.get("role") in ("user", "assistant")]
-    existing_summary = next((m.get("content", "") for m in system_messages
-                            if m.get("content", "").startswith("[РЕЗЮМЕ ПРОШЛОГО]")), "")
-    other_system = [m for m in system_messages if not m.get("content", "").startswith("[РЕЗЮМЕ ПРОШЛОГО]")]
+    other_system = [m for m in system_messages
+                    if not m.get("content", "").startswith("[РЕЗЮМЕ ПРОШЛОГО]")]
+
+    def pack(text, tail):
+        head = ([{"role": "system", "content": f"[РЕЗЮМЕ ПРОШЛОГО]\n{text}"}]
+                if text else [])
+        return other_system + head + tail
+
+    persist = bool(session_id)
+    st = _summary_get(session_id) if persist else {"text": "", "folded": 0}
+    summary_text = st["text"]
+    folded = min(max(0, int(st["folded"])), len(dialogue))
+
+    # Пока история короткая — ничего не сжимаем.
     if len(dialogue) <= MAX_MESSAGES_BEFORE_SUMMARY:
-        return other_system + ([{"role": "system", "content": existing_summary}] if existing_summary else []) + dialogue
-    to_summarize = dialogue[:-KEEP_RECENT]
-    recent = dialogue[-KEEP_RECENT:]
-    text_to_summarize = "\n".join(f"{m['role']}: {m.get('content','')}" for m in to_summarize if m.get("content"))
+        return pack(summary_text, dialogue[folded:])
+
+    target = len(dialogue) - KEEP_RECENT
+    tail = dialogue[folded:]
+    if target <= folded:
+        return pack(summary_text, tail)
+
+    new_part = dialogue[folded:target]
+    text_to_summarize = "\n".join(f"{m['role']}: {m.get('content', '')}"
+                                  for m in new_part if m.get("content"))
     if not text_to_summarize.strip():
-        return other_system + ([{"role": "system", "content": existing_summary}] if existing_summary else []) + dialogue
-    archive_input = (existing_summary + "\n\nНОВЫЕ СОБЫТИЯ:\n" if existing_summary else "") + text_to_summarize
+        return pack(summary_text, tail)
+
+    archive_input = ((summary_text + "\n\nНОВЫЕ СОБЫТИЯ:\n") if summary_text
+                     else "") + text_to_summarize
     try:
-        resp = client.chat.completions.create(
-            model=MODEL,
-            messages=[{"role": "system", "content": SUMMARY_PROMPT},
-                     {"role": "user", "content": f"Материал для обновления памяти:\n{archive_input}\n\nОбнови резюме, сохранив старые важные факты и добавив новые."}],
-            temperature=0.2,
-        )
-        summary = (resp.choices[0].message.content or "").strip()
-        if not summary:
-            return messages
-        return other_system + [{"role": "system", "content": f"[РЕЗЮМЕ ПРОШЛОГО]\n{summary}"}] + recent
+        with llm_slot() as ok:
+            if not ok:
+                raise RuntimeError("нет свободного слота модели")
+            resp = client.chat.completions.create(
+                model=SUMMARY_MODEL,
+                messages=[{"role": "system", "content": SUMMARY_PROMPT},
+                          {"role": "user", "content":
+                           f"Материал для обновления памяти:\n{archive_input}\n\n"
+                           "Обнови резюме, сохранив старые важные факты и добавив новые."}],
+                temperature=0.2,
+            )
+        new_summary = (resp.choices[0].message.content or "").strip()
+        if not new_summary:
+            raise RuntimeError("пустое резюме")
     except Exception:
-        return messages
+        # Сжать не вышло. Отдаём что есть: прежнее резюме плюс несвёрнутый хвост.
+        # Если резюме ещё нет — режем историю по окну, чтобы не переполнить контекст.
+        if summary_text:
+            return pack(summary_text, tail)
+        return other_system + dialogue[-KEEP_RECENT:]
+
+    if persist:
+        _summary_put(session_id, new_summary, target)
+    return pack(new_summary, dialogue[target:])
 
 
 def roll_dice(expr):
@@ -560,18 +667,21 @@ def extract_state(messages, current_state):
         if matches:
             fresh_events.append((event_id, sum(matches)))
 
-    recent = messages[-14:]
+    recent = messages[-8:]
     dialogue = "\n".join(f"{m['role']}: {m['content']}" for m in recent if m.get("content"))
     prompt = (f"ТЕКУЩЕЕ СОСТОЯНИЕ:\n{json.dumps(current, ensure_ascii=False)}\n\n"
               f"ДИАЛОГ:\n{dialogue}\n\nВерни обновлённое состояние JSON."
               " Не меняй XP, уровень и xp_next; XP рассчитывается отдельно сервером.")
     try:
-        resp = client.chat.completions.create(
-            model=MODEL,
-            messages=[{"role": "system", "content": STATE_EXTRACT_PROMPT},
-                     {"role": "user", "content": prompt}],
-            temperature=0.1,
-        )
+        with llm_slot() as ok:
+            if not ok:
+                raise RuntimeError("нет свободного слота модели")
+            resp = client.chat.completions.create(
+                model=EXTRACT_MODEL,
+                messages=[{"role": "system", "content": STATE_EXTRACT_PROMPT},
+                         {"role": "user", "content": prompt}],
+                temperature=0.1,
+            )
         new_state = clean_json(resp.choices[0].message.content or "")
     except Exception:
         new_state = {}
@@ -630,15 +740,130 @@ def extract_state(messages, current_state):
     return merged
 
 
+# ─── Сохранения ────────────────────────────────────────────────────────────
+def _safe_name(raw):
+    return re.sub(r"[^a-zA-Z0-9_\-]", "", raw or "")
+
+
+def _save_path(cid, name):
+    """Файл сохранения конкретного игрока: <clientId>~<имя>.json"""
+    return SAVES_DIR / f"{cid}~{name}.json"
+
+
+def _save_backup(path):
+    return path.with_name(path.stem + ".bak.json")
+
+
+def _save_candidates(cid, name):
+    """Сначала своё сохранение, потом общее (старые файлы без префикса)."""
+    return [_save_path(cid, name), SAVES_DIR / f"{name}.json"]
+
+
+def _collect_saves(cid):
+    """Имя → путь. Свои сохранения перекрывают одноимённые общие."""
+    prefix = f"{cid}~"
+    own, shared = {}, {}
+    for p in SAVES_DIR.glob("*.json"):
+        if p.name.endswith(".bak.json"):
+            continue
+        stem = p.stem
+        if stem.startswith(prefix):
+            own[stem[len(prefix):]] = p
+        elif "~" not in stem:
+            shared[stem] = p
+    merged = dict(shared)
+    merged.update(own)
+    return merged
+
+
+def _save_info(name, path):
+    """Имя, время последней записи (когда сохранили) и размер файла."""
+    try:
+        st = path.stat()
+        return {"name": name, "saved_at": st.st_mtime, "size": st.st_size}
+    except OSError:
+        return {"name": name, "saved_at": 0, "size": 0}
+
+
+# ─── Поиск главной страницы ────────────────────────────────────────────────
+def _find_index():
+    """Ищет index.html в нескольких местах.
+
+    Flask по умолчанию смотрит только в templates/ рядом с app.py.
+    Если файл оказался в корне или сборка идёт из другой папки — ищем шире.
+    """
+    candidates = [
+        BASE_DIR / "templates" / "index.html",
+        BASE_DIR / "index.html",
+        BASE_DIR / "static" / "index.html",
+        BASE_DIR / "public" / "index.html",
+        Path.cwd() / "templates" / "index.html",
+        Path.cwd() / "index.html",
+    ]
+    for p in candidates:
+        if p.is_file():
+            return p
+    return None
+
+
 @app.route("/api/health")
 def api_health():
-    return jsonify({"ok": True, "model": MODEL, "base_url_configured": bool(BASE_URL),
-                   "provider": "local/compatible" if BASE_URL else "OpenAI-compatible cloud"})
+    return jsonify({
+        "ok": True,
+        "model": MODEL,
+        "extract_model": EXTRACT_MODEL,
+        "summary_model": SUMMARY_MODEL,
+        "base_url_configured": bool(BASE_URL),
+        "llm_max_concurrent": LLM_MAX_CONCURRENT,
+        "llm_queue_timeout": LLM_QUEUE_TIMEOUT,
+        "saves_dir": str(SAVES_DIR),
+        "sessions_cached": len(_SUMMARY_STATE),
+        "index_found": str(_find_index() or ""),
+    })
+
+
+@app.route("/api/debug/files")
+def api_debug_files():
+    """Список файлов рядом с приложением.
+
+    Помогает понять, что реально доехало в контейнер, если шаблон не находится.
+    """
+    tree = {}
+    for root, dirs, files in os.walk(BASE_DIR):
+        dirs[:] = [d for d in dirs
+                   if d not in (".venv", "venv", "__pycache__", ".git", "node_modules")]
+        rel = os.path.relpath(root, BASE_DIR)
+        if files:
+            tree[rel] = sorted(files)
+    found = _find_index()
+    return jsonify({
+        "base_dir": str(BASE_DIR),
+        "cwd": os.getcwd(),
+        "index_found": str(found) if found else None,
+        "files": tree,
+    })
 
 
 @app.route("/")
 def index():
-    return render_template("index.html")
+    path = _find_index()
+    if path is None:
+        return (
+            "<!DOCTYPE html><html lang='ru'><head><meta charset='utf-8'>"
+            "<title>index.html не найден</title></head>"
+            "<body style='font-family:sans-serif;max-width:640px;margin:60px auto;"
+            "line-height:1.6;color:#333'>"
+            "<h1>index.html не найден</h1>"
+            "<p>Приложение работает, но не видит файл главной страницы. "
+            "Откройте <a href='/api/debug/files'><code>/api/debug/files</code></a> — "
+            "там список файлов, которые доехали в контейнер.</p>"
+            "<p>Проверьте: файл должен лежать в папке <code>templates</code> "
+            "рядом с <code>app.py</code> и называться ровно "
+            "<code>index.html</code> (строчными буквами).</p>"
+            "</body></html>",
+            500,
+        )
+    return send_from_directory(path.parent, path.name)
 
 
 @app.route("/api/roll", methods=["POST"])
@@ -660,11 +885,15 @@ def api_chat():
     if messages[0].get("role") != "system":
         messages = [{"role": "system", "content": SYSTEM_PROMPT}] + messages
     state_context = {k: v for k, v in (game_state.items() if isinstance(game_state, dict) else [])
-                    if k not in ("xp_event_ids",)}
-    messages = messages[:1] + [{"role": "system", "content": "[АКТУАЛЬНОЕ СОСТОЯНИЕ ПЕРСОНАЖА — справочная информация, не меняй числа без игрового события]\n" + json.dumps(state_context, ensure_ascii=False)}] + messages[1:]
-    messages = summarize_old_messages(messages)
+                    if k in STATE_FIELDS}
+    messages = messages[:1] + [{"role": "system", "content": STATE_NOTE + json.dumps(state_context, ensure_ascii=False)}] + messages[1:]
+    messages = summarize_old_messages(messages, _header_token("X-Session-Id", 64))
 
     def generate():
+        if not LLM_SEM.acquire(timeout=LLM_QUEUE_TIMEOUT):
+            # Префикс «[Ошибка API:» клиент распознаёт и не пишет это в историю игры.
+            yield "\n[Ошибка API: сервер занят — все слоты модели заняты. Подождите минуту и повторите.]"
+            return
         try:
             try:
                 stream = client.chat.completions.create(
@@ -692,6 +921,8 @@ def api_chat():
                     yield text
         except Exception as e:
             yield "\n[Ошибка API: запрос к модели не выполнен. Проверь настройки модели/API и попробуй снова.]"
+        finally:
+            LLM_SEM.release()
 
     return Response(generate(), mimetype="text/plain; charset=utf-8")
 
@@ -708,25 +939,29 @@ def api_state():
 
 @app.route("/api/saves")
 def api_saves_list():
-    return jsonify(sorted(p.stem for p in SAVES_DIR.glob("*.json") if not p.name.endswith(".bak.json")))
+    """Список сохранений игрока: имя, время записи, размер. Новые сверху."""
+    saves = _collect_saves(_client_id())
+    items = [_save_info(name, path) for name, path in saves.items()]
+    items.sort(key=lambda x: x["saved_at"], reverse=True)
+    return jsonify(items)
 
 
 @app.route("/api/save", methods=["POST"])
 def api_save():
     data = request.get_json(silent=True) or {}
-    name = re.sub(r"[^a-zA-Z0-9_\-]", "", data.get("name") or "") or "default"
-    path = SAVES_DIR / f"{name}.json"
+    name = _safe_name(data.get("name")) or "default"
+    path = _save_path(_client_id(), name)
     payload = {"schema_version": 2, "messages": data.get("messages") or [],
                "state": data.get("state") or DEFAULT_STATE}
     serialized = json.dumps(payload, ensure_ascii=False, indent=2)
     # Backup previous file before replacing; atomic replace avoids partial JSON on crash.
     if path.exists():
-        backup = SAVES_DIR / f"{name}.bak.json"
+        backup = _save_backup(path)
         try:
             backup.write_text(path.read_text(encoding="utf-8"), encoding="utf-8")
         except OSError:
             pass
-    fd, temp_name = tempfile.mkstemp(prefix=f".{name}-", suffix=".tmp", dir=SAVES_DIR)
+    fd, temp_name = tempfile.mkstemp(prefix=f".{path.stem}-", suffix=".tmp", dir=SAVES_DIR)
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as f:
             f.write(serialized)
@@ -736,14 +971,64 @@ def api_save():
     finally:
         if os.path.exists(temp_name):
             os.unlink(temp_name)
-    return jsonify({"ok": True, "name": name})
+    return jsonify({"ok": True, "name": name, "saved_at": path.stat().st_mtime})
+
+
+@app.route("/api/save/rename", methods=["POST"])
+def api_save_rename():
+    data = request.get_json(silent=True) or {}
+    old = _safe_name(data.get("name"))
+    new = _safe_name(data.get("new_name"))
+    if not old or not new:
+        return jsonify({"ok": False, "error": "нужны name и new_name"}), 400
+    if old == new:
+        return jsonify({"ok": True, "name": new})
+
+    cid = _client_id()
+    src = next((p for p in _save_candidates(cid, old) if p.exists()), None)
+    if src is None:
+        return jsonify({"ok": False, "error": "сохранение не найдено"}), 404
+
+    dst = _save_path(cid, new)
+    if dst.exists():
+        return jsonify({"ok": False, "error": "сохранение с таким именем уже есть"}), 409
+    try:
+        os.replace(src, dst)          # время записи при переименовании сохраняется
+        src_bak = _save_backup(src)
+        if src_bak.exists():
+            os.replace(src_bak, _save_backup(dst))
+    except OSError as exc:
+        return jsonify({"ok": False, "error": str(exc)[:200]}), 500
+    return jsonify({"ok": True, "name": new})
+
+
+@app.route("/api/save/delete", methods=["POST"])
+def api_save_delete():
+    data = request.get_json(silent=True) or {}
+    name = _safe_name(data.get("name"))
+    if not name:
+        return jsonify({"ok": False, "error": "нужно name"}), 400
+
+    cid = _client_id()
+    removed = []
+    for path in _save_candidates(cid, name):
+        for f in (path, _save_backup(path)):
+            if f.exists():
+                try:
+                    f.unlink()
+                except OSError as exc:
+                    return jsonify({"ok": False, "error": str(exc)[:200]}), 500
+                removed.append(f.name)
+    if not removed:
+        return jsonify({"ok": False, "error": "сохранение не найдено"}), 404
+    return jsonify({"ok": True, "name": name, "removed": removed})
 
 
 @app.route("/api/load/<name>")
 def api_load(name):
-    name = re.sub(r"[^a-zA-Z0-9_\-]", "", name)
-    path = SAVES_DIR / f"{name}.json"
-    if not path.exists():
+    name = _safe_name(name)
+    path = next((p for p in _save_candidates(_client_id(), name) if p.exists()), None)
+    if path is None:
         return jsonify({"error": "not found"}), 404
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
