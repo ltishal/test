@@ -8,8 +8,14 @@ import threading
 from contextlib import contextmanager
 from pathlib import Path
 
-from dotenv import load_dotenv
-load_dotenv(Path(__file__).with_name(".env"))
+# .env читаем, только если файл есть и установлен python-dotenv.
+# На Railway переменные приходят из панели Variables — пакет там не нужен,
+# и приложение не должно падать из-за его отсутствия.
+try:
+    from dotenv import load_dotenv
+    load_dotenv(Path(__file__).with_name(".env"))
+except ImportError:
+    pass
 
 from flask import (Flask, request, jsonify, Response, render_template,
                    send_from_directory)
