@@ -312,6 +312,7 @@
 
 <header>
   <h1>🎲 <span>RPG</span> ИИ-Мастер</h1>
+  <span id="quota-counter" role="status" style="font-size:11px;color:var(--accent-gold);margin-left:auto;margin-right:10px;white-space:nowrap" title="Оставшиеся ходы">Ходы: …</span>
   <button class="icon-btn" id="menu-btn" aria-label="Меню">☰</button>
 </header>
 
@@ -358,6 +359,10 @@
     <button class="btn" id="tts-voice-btn">🎙 Сменить голос</button>
     <button class="btn" id="tts-stop-btn">⏹ Остановить</button>
   </div>
+  <h2>Доступ</h2>
+  <div class="drawer-section">
+    <button class="btn" data-action="quota">🎫 Лимит и доступ</button>
+  </div>
   <h2>Игра</h2>
   <div class="drawer-section">
     <button class="btn" data-action="save">💾 Сохранить</button>
@@ -385,9 +390,9 @@ const LS_KEY = 'rpg_session_v9';
 const TTS_KEY = 'rpg_tts_v1';
 
 /* ═══════════ ИДЕНТИФИКАТОРЫ ═══════════
-   clientId — постоянный для устройства: разделяет сохранения игроков.
-   sessionId — на одну партию: к нему на сервере привязано резюме прошлого.
-   Оба уходят заголовками во все запросы /api/. */
+   Browser ID is legacy and no longer grants access to saves or quotas.
+   The server instead issues a signed HttpOnly browser cookie.
+   sessionId scopes the storyline summary; it is not an authentication token. */
 
 const CLIENT_ID = (() => {
   let id = localStorage.getItem('rpg_client_id');
@@ -415,7 +420,6 @@ function resetSession() {
     if (u.startsWith('/api/')) {
       opts = Object.assign({}, opts || {});
       const h = Object.assign({}, opts.headers || {});
-      h['X-Client-Id'] = CLIENT_ID;
       h['X-Session-Id'] = SESSION_ID;
       opts.headers = h;
     }
@@ -434,7 +438,7 @@ const EMPTY_STATE = {
   dc_modifier:0, dc_modifier_reasons:[],
   position:"стоит", cover:"нет",
   weapon_in_hand:"", restrained:false,
-  level_history:[], xp_event_ids:[], level_pending:0
+  level_history:[], xp_event_ids:[], xp_scored_through:0, level_pending:0
 };
 
 const NOTE_TYPES = {
@@ -740,6 +744,33 @@ function addHtmlMsg(role, html) {
 }
 
 /* API CALLS */
+let quotaSnapshot = null;
+async function refreshQuota() {
+  try {
+    const response = await fetch('/api/quota');
+    if (!response.ok) return;
+    quotaSnapshot = await response.json();
+    const label = quotaSnapshot.tier === 'subscription' ? 'Сегодня' : 'Ходы';
+    document.getElementById('quota-counter').textContent = `${label}: ${quotaSnapshot.remaining}`;
+  } catch (_) {
+    document.getElementById('quota-counter').textContent = 'Ходы: —';
+  }
+}
+async function quotaModal() {
+  await refreshQuota();
+  const q = quotaSnapshot;
+  const account = q ? q.account_id : 'недоступен';
+  const remaining = q ? q.remaining : '?';
+  const label = q && q.tier === 'subscription' ? 'Подписка' : q && q.tier === 'pack' ? 'Пакет' : 'Бесплатный доступ';
+  modalContent.innerHTML = `<h3>🎫 Ходы и доступ</h3>
+    <p><b>${esc(label)}</b> · осталось ходов: <b>${esc(remaining)}</b></p>
+    <p class="save-note">Бесплатных ходов для нового браузера: ${q ? q.free_total : '40'}. Учёт идёт на сервере, по защищённой cookie. Очистка браузера не переносит сохранения.</p>
+    <p class="save-note">Автоматическая оплата ещё не подключена. Пакет из 300 ходов или подписку может выдать администратор вручную.</p>
+    <div style="font-size:12px;color:var(--text-secondary)">ID доступа (для администратора):<br><code style="overflow-wrap:anywhere">${esc(account)}</code></div>
+    <button class="btn primary" id="quota-close" style="margin-top:12px">Закрыть</button>`;
+  modalEl.classList.add('open');
+  document.getElementById('quota-close').onclick = () => modalEl.classList.remove('open');
+}
 async function callAI(msgs) {
   busy = true; sendBtn.disabled = true;
   document.querySelectorAll('.quick-btn').forEach(b => b.disabled = true);
@@ -748,12 +779,17 @@ async function callAI(msgs) {
   md.className = 'msg master typing-indicator';
   chatEl.appendChild(md); scrollBottom();
   let full = '';
+  let turnTicket = '';
   try {
     const res = await fetch('/api/chat', {
       method: 'POST', headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({messages: msgs, state})
     });
-    if (!res.ok) throw new Error('HTTP ' + res.status);
+    if (!res.ok) {
+      const error = await res.json().catch(() => ({}));
+      throw new Error(error.error || ('HTTP ' + res.status));
+    }
+    turnTicket = res.headers.get('X-Turn-Ticket') || '';
     const reader = res.body.getReader(); const dec = new TextDecoder();
     md.classList.remove('typing-indicator');
     while (true) {
@@ -786,19 +822,26 @@ async function callAI(msgs) {
         ttsSpeak(full, btn);
       }, 60);
     }
-    await updateState();
+    await updateState(turnTicket);
   }
+  await refreshQuota();
   busy = false; sendBtn.disabled = false;
   document.querySelectorAll('.quick-btn').forEach(b => b.disabled = false);
   inputEl.focus();
 }
-async function updateState() {
+async function updateState(ticket) {
+  if (!ticket) { addMsg('system', 'Не получено подтверждение хода — лист персонажа не обновлён.'); return; }
   if (!state) state = {...EMPTY_STATE};
   try {
     const res = await fetch('/api/state', {
-      method: 'POST', headers: {'Content-Type': 'application/json'},
+      method: 'POST', headers: {'Content-Type': 'application/json', 'X-Turn-Ticket': ticket},
       body: JSON.stringify({messages, state})
     });
+    if (!res.ok) {
+      const error = await res.json().catch(() => ({}));
+      addMsg('system', 'Лист персонажа не обновился: ' + (error.error || ('HTTP ' + res.status)));
+      return;
+    }
     if (res.ok) {
       const oldLevel = Number(state.level || 1);
       state = await res.json();
@@ -1621,6 +1664,7 @@ document.querySelectorAll('#drawer .btn[data-action]').forEach(btn => {
     else if (a === 'save') doSave();
     else if (a === 'load') doLoad();
     else if (a === 'transfer') doTransfer();
+    else if (a === 'quota') quotaModal();
     else if (a === 'reset') doReset();
     else if (a === 'help') doHelp();
   };
@@ -1640,6 +1684,7 @@ function init() {
     if (!Array.isArray(state.abilities)) state.abilities = [];
     if (!Array.isArray(state.level_history)) state.level_history = [];
     if (!Array.isArray(state.xp_event_ids)) state.xp_event_ids = [];
+    // Historical saves do not have xp_scored_through; server migrates them safely.
     if (typeof state.level_pending !== 'number') state.level_pending = 0;
     if (!Array.isArray(state.notes)) state.notes = [];
     if (typeof state.dc_modifier !== 'number') state.dc_modifier = 0;
@@ -1670,6 +1715,7 @@ function init() {
     showIntro();
   }
   renderWorlds();
+  refreshQuota();
   ttsLoad();
   autosize();
 }
