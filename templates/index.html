@@ -1184,9 +1184,11 @@ async function doRoll(expr) {
     const d = await res.json();
     if (d.error) { addMsg('system', 'Ошибка броска: ' + d.error); return; }
     const m = d.mod ? (d.mod > 0 ? '+' + d.mod : '' + d.mod) : '';
-    addHtmlMsg('dice', `🎲 <b>${esc(d.expr)}</b> → [${d.rolls.join(', ')}]${m} = <b>${d.total}</b>`);
+    const kept = d.kept ? ` → учтены [${d.kept.join(', ')}]` : '';
+    const result = `[${d.rolls.join(', ')}]${kept}${m} = ${d.total}`;
+    addHtmlMsg('dice', `🎲 <b>${esc(d.expr)}</b> → ${esc(result)}`);
     messages.push({role: 'user', content:
-      `[[БРОСОК]] ${d.expr} → [${d.rolls.join(', ')}]${m} = ${d.total}. Сравни с DC, который ты объявил ранее. Опиши результат, успех/провал/осложнение. Не решай за игрока.`});
+      `[[БРОСОК]] ${d.expr} → ${result}. Используй этот итог. Сравни с объявленной сложностью только для проверок, атак и спасбросков. Опиши последствия. Не решай за игрока.`});
     persist(); await callAI(messages);
   } catch(e) { addMsg('system', 'Ошибка: ' + e.message); }
 }
@@ -1205,7 +1207,13 @@ async function doSheet() {
   });
 
   const inv = (state.inventory || []).length
-    ? state.inventory.map(i => `<span class="tag">${esc(i)}</span>`).join('')
+    ? state.inventory.map(item => {
+        const label = typeof item === 'object' && item !== null
+          ? item.name || item.title || 'Предмет'
+          : item;
+        const count = Number(item?.quantity);
+        return `<span class="tag">${esc(label)}${count > 1 ? ` ×${esc(count)}` : ''}</span>`;
+      }).join('')
     : '<span class="tag empty">пусто</span>';
   const cd = (state.conditions || []).length
     ? state.conditions.map(c => `<span class="tag">${esc(c)}</span>`).join('')
@@ -1232,9 +1240,9 @@ async function doSheet() {
     }).join('');
     const rewards = q.rewards && Object.keys(q.rewards).length
       ? `<div style="font-size:11px;color:var(--text-secondary);margin-top:4px">
-           🎁 ${q.rewards.xp ? `+${q.rewards.xp} XP` : ''}
+           🎁 ${Array.isArray(q.rewards) ? q.rewards.map(esc).join(', ') : q.rewards.xp ? `+${esc(q.rewards.xp)} XP` : ''}
            ${q.rewards.gold ? ` · +${q.rewards.gold}💰` : ''}
-           ${q.rewards.items && q.rewards.items.length ? ' · ' + q.rewards.items.map(esc).join(', ') : ''}
+           ${Array.isArray(q.rewards.items) && q.rewards.items.length ? ' · ' + q.rewards.items.map(esc).join(', ') : ''}
          </div>`
       : '';
     return `<div class="ability-card" style="border-color:${statusColor};${isCompleted ? 'opacity:0.55;' : ''}">
@@ -1833,7 +1841,7 @@ function rollModal() {
         ${presets.map(p => `<button class="dice-preset" data-preset="${p}">${p}</button>`).join('')}
       </div>
       <input id="modal-input" type="text" value="1d20" placeholder="1d20+3">
-      <div style="font-size:11px;color:var(--text-secondary)">Формат: NdM±K — например, 2d6+1, 1d20-2</div>
+      <div style="font-size:11px;color:var(--text-secondary)">Например, 2d6+1, 1d20-2 или 2d20kh1+1 с преимуществом</div>
       <div style="display:flex;gap:8px">
         <button class="btn" style="flex:1" id="modal-cancel">Отмена</button>
         <button class="btn primary" style="flex:1" id="modal-ok">Бросить</button>
