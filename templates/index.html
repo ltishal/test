@@ -45,6 +45,14 @@
     font-size: 19px; line-height: 1.2; word-break: break-word;
   }
   .identity-sub { font-size: 12px; color: var(--text-secondary); }
+  .identity-traits { display: flex; flex-wrap: wrap; gap: 6px; margin: 3px 0 0; padding: 0; list-style: none; }
+  .identity-trait {
+    display: flex; align-items: center; gap: 5px; min-width: 0; max-width: 100%;
+    padding: 3px 8px; border: 1px solid var(--border-subtle); border-radius: 6px;
+    background: var(--bg-card); color: var(--text-primary); font-size: 12px;
+  }
+  .identity-trait-icon { flex-shrink: 0; font-size: 15px; }
+  .identity-trait-name { overflow-wrap: anywhere; }
   .status-chips { display: flex; gap: 6px; flex-wrap: wrap; }
   .status-chip {
     background: var(--bg-card); padding: 2px 8px; border-radius: 6px;
@@ -526,6 +534,7 @@ function esc(s) {
 }
 
 const CHARACTER_CUSTOM_KEY = 'rpg_character_options_v1';
+const CHARACTER_CUSTOM_ICON = '✦';
 const CHARACTER_CATEGORIES = [
   { key: 'class', label: 'Класс', heading: 'Выберите класс', options: [
     ['⚔️', 'Воин'], ['🪓', 'Варвар'], ['🗡️', 'Плут'], ['🏹', 'Следопыт'],
@@ -630,7 +639,7 @@ function openCharacterBuilder(world = null) {
       return;
     }
 
-    const options = [...category.options, ...customOptions[category.key].map(label => ['✦', label])];
+    const options = [...category.options, ...customOptions[category.key].map(label => [CHARACTER_CUSTOM_ICON, label])];
     stepPanel.innerHTML = `<h3 id="character-step-title" tabindex="-1">${category.heading}</h3>
       <div class="character-grid" role="group" aria-labelledby="character-step-title">
         ${options.map(([icon, label]) => `<button type="button" class="btn character-tile"
@@ -897,6 +906,23 @@ function updateNotesBadge() {
 }
 
 /* STATUS */
+function renderCharacterTraits(character) {
+  const traits = ['race', 'class', 'background'].map(key => {
+    const value = typeof character[key] === 'string' ? character[key].trim() : '';
+    if (!value) return '';
+    const category = CHARACTER_CATEGORIES.find(category => category.key === key);
+    const option = category.options.find(([, name]) => name.toLocaleLowerCase('ru') === value.toLocaleLowerCase('ru'));
+    const icon = option?.[0] || CHARACTER_CUSTOM_ICON;
+    return `<li class="identity-trait" title="${category.label}">
+      <span class="identity-trait-icon" aria-hidden="true">${icon}</span>
+      <span class="identity-trait-name">${esc(value)}</span>
+    </li>`;
+  }).join('');
+  return traits
+    ? `<ul class="identity-traits" aria-label="Раса, класс и предыстория">${traits}</ul>`
+    : '<div class="identity-sub">Персонаж пока не создан</div>';
+}
+
 function renderStatus() {
   if (!state) { statusEl.innerHTML = ''; return; }
   const hpPct = state.max_hp ? Math.max(0, Math.min(100, state.hp / state.max_hp * 100)) : 0;
@@ -904,7 +930,6 @@ function renderStatus() {
   const c = (state.conditions || []).length
     ? ' · ' + state.conditions.map(x => `<span style="color:#d45a5a">${esc(x)}</span>`).join(', ')
     : '';
-  const raceClass = [state.race, state.class].filter(Boolean).join(' · ');
   const dc = state.dc_modifier || 0;
   let dcChip = '';
   if (dc !== 0) {
@@ -925,7 +950,7 @@ function renderStatus() {
     <div class="status-top">
       <div class="identity">
         <div class="identity-name">${esc(state.name || 'Пустой')}</div>
-        <div class="identity-sub">${esc(raceClass || 'раса и класс пока не определены')}</div>
+        ${renderCharacterTraits(state)}
       </div>
     </div>
     <div class="status-chips">
