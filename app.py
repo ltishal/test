@@ -13,9 +13,12 @@ import tempfile
 import threading
 from contextlib import contextmanager
 from pathlib import Path
+from uuid import uuid4
 
-from flask import Flask, request, jsonify, Response, render_template
+from flask import Flask, request, jsonify, Response, render_template, stream_with_context
 from openai import OpenAI
+
+from token_usage import TokenUsage, state_turn_id
 
 BASE_DIR = Path(__file__).resolve().parent
 
@@ -95,6 +98,8 @@ def _saves_dir():
 
 
 SAVES_DIR = _saves_dir()
+TOKEN_USAGE = TokenUsage(SAVES_DIR / "token_usage.sqlite3")
+app.add_url_rule("/admin/tokens", view_func=TOKEN_USAGE.dashboard)
 
 FREQ_PENALTY = float(os.getenv("OPENAI_FREQ_PENALTY", "0.35"))
 PRES_PENALTY = float(os.getenv("OPENAI_PRES_PENALTY", "0.25"))
@@ -164,16 +169,35 @@ def _error_hint(exc):
 
 
 def _start_stream(messages):
-    """Стрим мастера. Если провайдер не принимает штрафы — повтор без них."""
-    base = dict(model=MODEL, messages=messages, temperature=0.9, stream=True)
+    """Поддерживает провайдеры, отклоняющие штрафы или потоковый учёт токенов."""
+    options = dict(model=MODEL, messages=messages, temperature=0.9, stream=True,
+                   stream_options={"include_usage": True},
+                   frequency_penalty=FREQ_PENALTY, presence_penalty=PRES_PENALTY)
+    while True:
+        try:
+            return client.chat.completions.create(**options)
+        except Exception as exc:
+            detail = str(exc).lower()
+            if ("stream_options" in options
+                    and getattr(exc, "status_code", None) in (400, 422, 501)
+                    and any(word in detail for word in ("stream_options", "include_usage"))):
+                del options["stream_options"]
+            elif "frequency_penalty" in options and any(word in detail for word in PENALTY_REJECT):
+                del options["frequency_penalty"]
+                del options["presence_penalty"]
+            else:
+                raise
+
+
+def _measured_completion(turn_id, stage, **options):
+    response = None
     try:
-        return client.chat.completions.create(
-            **base, frequency_penalty=FREQ_PENALTY, presence_penalty=PRES_PENALTY)
-    except Exception as exc:
-        if not any(h in str(exc).lower() for h in PENALTY_REJECT):
-            raise
-        app.logger.warning("Провайдер отклонил штрафы, повтор без них: %s", _short_error(exc))
-        return client.chat.completions.create(**base)
+        response = client.chat.completions.create(**options)
+        return response
+    finally:
+        if turn_id:
+            model = getattr(response, "model", None) or options["model"]
+            TOKEN_USAGE.record(turn_id, stage, model, getattr(response, "usage", None))
 
 
 def _header_token(name, limit):
@@ -589,7 +613,7 @@ def _summary_put(sid, text, folded):
         _SUMMARY_STATE[sid] = {"text": text, "folded": folded}
 
 
-def summarize_old_messages(messages, session_id=""):
+def summarize_old_messages(messages, session_id="", turn_id=None):
     """Сворачивает старую часть диалога в одно резюме.
 
     Резюме хранится по session_id и обновляется инкрементально: за ход
@@ -635,7 +659,7 @@ def summarize_old_messages(messages, session_id=""):
         with llm_slot() as ok:
             if not ok:
                 raise RuntimeError("нет свободного слота модели")
-            resp = client.chat.completions.create(
+            resp = _measured_completion(turn_id, "summary",
                 model=SUMMARY_MODEL,
                 messages=[{"role": "system", "content": SUMMARY_PROMPT},
                           {"role": "user", "content":
@@ -750,7 +774,7 @@ def message_event_id(message, index):
     return hashlib.sha256(raw.encode("utf-8", errors="replace")).hexdigest()
 
 
-def extract_state(messages, current_state):
+def extract_state(messages, current_state, turn_id=None):
     current = dict(DEFAULT_STATE)
     if isinstance(current_state, dict):
         current.update(current_state)
@@ -786,7 +810,7 @@ def extract_state(messages, current_state):
         with llm_slot() as ok:
             if not ok:
                 raise RuntimeError("нет свободного слота модели")
-            resp = client.chat.completions.create(
+            resp = _measured_completion(turn_id, "state",
                 model=EXTRACT_MODEL,
                 messages=[{"role": "system", "content": STATE_EXTRACT_PROMPT},
                          {"role": "user", "content": prompt}],
@@ -978,13 +1002,17 @@ def api_chat():
     state_context = {k: v for k, v in (game_state.items() if isinstance(game_state, dict) else [])
                     if k in STATE_FIELDS}
     messages = messages[:1] + [{"role": "system", "content": STATE_NOTE + json.dumps(state_context, ensure_ascii=False)}] + messages[1:]
-    messages = summarize_old_messages(messages, _header_token("X-Session-Id", 64))
+    turn_id = uuid4().hex
+    messages = summarize_old_messages(messages, _header_token("X-Session-Id", 64), turn_id)
 
     def generate():
         if not LLM_SEM.acquire(timeout=LLM_QUEUE_TIMEOUT):
             yield ("\n[Ошибка API: сервер занят — все слоты модели заняты. "
                    "Подождите минуту и повторите.]")
             return
+        stream = None
+        usage = None
+        model = MODEL
         try:
             try:
                 stream = _start_stream(messages)
@@ -994,6 +1022,9 @@ def api_chat():
                 yield f"\n[Ошибка API: {_short_error(e)}" + (f" {hint}" if hint else "") + "]"
                 return
             for chunk in stream:
+                if getattr(chunk, "usage", None) is not None:
+                    usage = chunk.usage
+                    model = getattr(chunk, "model", None) or model
                 if not chunk.choices:
                     continue
                 delta = getattr(chunk.choices[0], "delta", None)
@@ -1005,12 +1036,17 @@ def api_chat():
             hint = _error_hint(e)
             yield f"\n[Ошибка API: {_short_error(e)}" + (f" {hint}" if hint else "") + "]"
         finally:
-            LLM_SEM.release()
+            try:
+                if stream is not None:
+                    stream.close()
+            finally:
+                LLM_SEM.release()
+                TOKEN_USAGE.record(turn_id, "chat", model, usage)
 
     return Response(
-        generate(),
+        stream_with_context(generate()),
         mimetype="text/plain; charset=utf-8",
-        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no", "X-Turn-Id": turn_id},
     )
 
 
@@ -1021,7 +1057,8 @@ def api_state():
     state = data.get("state") or DEFAULT_STATE
     if not isinstance(messages, list) or not messages:
         return jsonify(state)
-    return jsonify(extract_state(messages, state))
+    turn_id = state_turn_id(request.headers.get("X-Turn-Id"))
+    return jsonify(extract_state(messages, state, turn_id))
 
 
 @app.route("/api/saves")

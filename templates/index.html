@@ -1016,12 +1016,14 @@ async function callAI(msgs) {
   md.className = 'msg master typing-indicator';
   chatEl.appendChild(md); scrollBottom();
   let full = '';
+  let turnId = '';
   try {
     const res = await fetch('/api/chat', {
       method: 'POST', headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({messages: msgs, state})
     });
     if (!res.ok) throw new Error('HTTP ' + res.status);
+    turnId = res.headers.get('X-Turn-Id') || '';
     const reader = res.body.getReader(); const dec = new TextDecoder();
     md.classList.remove('typing-indicator');
     while (true) {
@@ -1054,17 +1056,19 @@ async function callAI(msgs) {
         ttsSpeak(full, btn);
       }, 60);
     }
-    await updateState();
+    await updateState(turnId);
   }
   busy = false; sendBtn.disabled = false;
   document.querySelectorAll('.quick-btn').forEach(b => b.disabled = false);
   inputEl.focus();
 }
-async function updateState() {
+async function updateState(turnId) {
   if (!state) state = {...EMPTY_STATE};
+  const headers = {'Content-Type': 'application/json'};
+  if (turnId) headers['X-Turn-Id'] = turnId;
   try {
     const res = await fetch('/api/state', {
-      method: 'POST', headers: {'Content-Type': 'application/json'},
+      method: 'POST', headers,
       body: JSON.stringify({messages, state})
     });
     if (res.ok) {
