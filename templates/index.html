@@ -524,7 +524,7 @@ function resetSession() {
 const EMPTY_STATE = {
   name:"Пустой", race:"", class:"", background:"",
   level:1, xp:0, xp_next:100,
-  hp:10, max_hp:10, gold:0,
+  hp:10, max_hp:10, gold:0, silver:0, copper:0,
   stats:{str:10,dex:10,con:10,int:10,wis:10,cha:10},
   proficiencies:[], skills:[], abilities:[],
   inventory:[], notes:[], quests:[], conditions:[],
@@ -957,6 +957,14 @@ function renderCharacterTraits(character) {
     : '<div class="identity-sub">Персонаж пока не создан</div>';
 }
 
+function formatCoins(wallet, showZero = false) {
+  const coins = [['gold', 'зм'], ['silver', 'см'], ['copper', 'мм']]
+    .map(([key, unit]) => [Number(wallet?.[key]) || 0, unit])
+    .filter(([count]) => count > 0)
+    .map(([count, unit]) => `${count} ${unit}`);
+  return coins.join(' · ') || (showZero ? '0' : '');
+}
+
 function renderStatus() {
   if (!state) { statusEl.innerHTML = ''; return; }
   const hpPct = state.max_hp ? Math.max(0, Math.min(100, state.hp / state.max_hp * 100)) : 0;
@@ -990,7 +998,7 @@ function renderStatus() {
     <div class="status-chips">
       <span class="status-chip">Ур. ${state.level}</span>
       ${state.level_pending ? `<span class="status-chip" title="Обсуди повышение с мастером">⬆ Повышение!</span>` : ''}
-      <span class="status-chip">💰 ${state.gold}</span>
+      <span class="status-chip">💰 ${formatCoins(state, true)}</span>
       ${posChip}
       ${covChip}
       ${restrChip}
@@ -1042,76 +1050,86 @@ function addHtmlMsg(role, html) {
 }
 
 /* API CALLS */
-async function callAI(msgs) {
-  if (!gameAccess) return;
-  busy = true; sendBtn.disabled = true;
-  document.querySelectorAll('.quick-btn').forEach(b => b.disabled = true);
+function setTurnBusy(value) {
+  busy = value;
+  sendBtn.disabled = busy || !gameAccess;
+  document.querySelectorAll('.quick-btn').forEach(button => {
+    button.disabled = busy;
+  });
+}
+
+async function callAI(pending) {
+  setTurnBusy(true);
   if (tts.speaking) ttsStop();
   const md = document.createElement('div');
   md.className = 'msg master typing-indicator';
-  chatEl.appendChild(md); scrollBottom();
+  chatEl.appendChild(md);
+  scrollBottom();
   let full = '';
   let turnId = '';
   try {
+    if (!gameAccess) throw new Error('Игра временно недоступна.');
     const res = await fetch('/api/chat', {
       method: 'POST', headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({messages: msgs, state})
+      body: JSON.stringify({messages: [...messages, pending], state})
     });
     if (res.status === 503) {
-      const problem = await res.json();
-      const rejected = msgs.at(-1);
-      if (msgs === messages && rejected?.role === 'user') {
-        messages.pop();
-        if (!inputEl.value && !rejected.content.startsWith('[[')) {
-          inputEl.value = rejected.content;
-          autosize();
-        }
-        persist();
-        renderAll();
-      }
-      refreshPresence();
+      const problem = await res.json().catch(() => ({}));
       throw new Error(problem.error || 'Игра временно недоступна.');
     }
     if (!res.ok) throw new Error('HTTP ' + res.status);
     turnId = res.headers.get('X-Turn-Id') || '';
-    const reader = res.body.getReader(); const dec = new TextDecoder();
+    const reader = res.body.getReader();
+    const dec = new TextDecoder();
     md.classList.remove('typing-indicator');
     while (true) {
       const {done, value} = await reader.read();
       if (done) break;
-      const c = dec.decode(value, {stream: true});
-      if (!c) continue;
-      full += c; md.textContent = full; scrollBottom();
+      full += dec.decode(value, {stream: true});
+      md.textContent = full;
+      scrollBottom();
     }
-    const t = dec.decode();
-    if (t) { full += t; md.textContent = full; scrollBottom(); }
-  } catch(e) {
-    md.classList.remove('typing-indicator');
-    md.textContent = (full || '') + `\n[Ошибка: ${e.message}]`;
-  }
-  if (full.trim() && full.includes('[Ошибка API:')) {
-    md.remove();
-    addMsg('system', full.trim() + '\n\nОтвет не добавлен в историю игры. Можно повторить отправку.');
-    full = '';
-  }
-  if (full.trim()) {
-    messages.push({role: 'assistant', content: full});
+    full += dec.decode();
+    const failure = full.indexOf('[Ошибка API:');
+    if (failure !== -1) throw new Error(full.slice(failure).trim());
+    if (!full.trim()) throw new Error('Мастер вернул пустой ответ.');
+    messages.push(pending, {role: 'assistant', content: full});
     persist();
     md.remove();
     const finalMsg = addMsg('master', full);
     tts.lastText = full;
     if (tts.enabled && tts.available) {
-      setTimeout(() => {
-        const btn = finalMsg.querySelector('.speak-btn');
-        ttsSpeak(full, btn);
-      }, 60);
+      setTimeout(() => ttsSpeak(full, finalMsg.querySelector('.speak-btn')), 60);
     }
     await updateState(turnId);
+  } catch (error) {
+    md.remove();
+    const isRoll = pending.content.startsWith('[[БРОСОК]]');
+    if (!isRoll && !inputEl.value) {
+      inputEl.value = pending.content;
+      autosize();
+    }
+    renderAll();
+    const notice = addMsg('system', error.message + '\n\nХод не добавлен в историю.');
+    if (isRoll) {
+      const previous = messages.at(-1);
+      const button = document.createElement('button');
+      button.className = 'btn';
+      button.textContent = 'Отправить тот же бросок';
+      button.onclick = async () => {
+        if (busy || messages.at(-1) !== previous) return;
+        button.disabled = true;
+        notice.remove();
+        addMsg('dice', pending.content.split('. Используй этот итог.')[0].replace('[[БРОСОК]] ', '🎲 '));
+        await callAI(pending);
+      };
+      notice.appendChild(button);
+    }
+  } finally {
+    setTurnBusy(false);
+    refreshPresence();
+    inputEl.focus();
   }
-  busy = false; sendBtn.disabled = !gameAccess;
-  refreshPresence();
-  document.querySelectorAll('.quick-btn').forEach(b => b.disabled = false);
-  inputEl.focus();
 }
 async function updateState(turnId) {
   if (!state) state = {...EMPTY_STATE};
@@ -1151,10 +1169,8 @@ async function sendMessage(text) {
     return;
   }
   addMsg('user', text);
-  messages.push({role: 'user', content: text});
-  persist();
   inputEl.value = ''; autosize();
-  await callAI(messages);
+  await callAI({role: 'user', content: text});
 }
 function handleCommand(cmd, arg) {
   switch(cmd) {
@@ -1172,6 +1188,7 @@ function handleCommand(cmd, arg) {
 }
 async function doRoll(expr) {
   if (busy || !gameAccess) return;
+  setTurnBusy(true);
   const animDiv = addHtmlMsg('dice',
     `<span class="dice-emoji">🎲</span> Бросок ${esc(expr)}...`);
   await new Promise(r => setTimeout(r, 450));
@@ -1187,10 +1204,13 @@ async function doRoll(expr) {
     const kept = d.kept ? ` → учтены [${d.kept.join(', ')}]` : '';
     const result = `[${d.rolls.join(', ')}]${kept}${m} = ${d.total}`;
     addHtmlMsg('dice', `🎲 <b>${esc(d.expr)}</b> → ${esc(result)}`);
-    messages.push({role: 'user', content:
+    await callAI({role: 'user', content:
       `[[БРОСОК]] ${d.expr} → ${result}. Используй этот итог. Сравни с объявленной сложностью только для проверок, атак и спасбросков. Опиши последствия. Не решай за игрока.`});
-    persist(); await callAI(messages);
-  } catch(e) { addMsg('system', 'Ошибка: ' + e.message); }
+  } catch(e) {
+    addMsg('system', 'Ошибка: ' + e.message);
+  } finally {
+    setTurnBusy(false);
+  }
 }
 
 /* SHEET */
@@ -1230,6 +1250,7 @@ async function doSheet() {
     const t = typeInfo[q.type] || typeInfo.side;
     const isCompleted = q.status === 'completed';
     const isFailed = q.status === 'failed';
+    const offered = q.status === 'offered';
     const statusIcon = isCompleted ? '✓' : (isFailed ? '✗' : '●');
     const statusColor = isCompleted ? '#5a5a4e' : (isFailed ? '#d45a5a' : t.color);
     const stages = (q.stages || []).map((st, i) => {
@@ -1241,7 +1262,7 @@ async function doSheet() {
     const rewards = q.rewards && Object.keys(q.rewards).length
       ? `<div style="font-size:11px;color:var(--text-secondary);margin-top:4px">
            🎁 ${Array.isArray(q.rewards) ? q.rewards.map(esc).join(', ') : q.rewards.xp ? `+${esc(q.rewards.xp)} XP` : ''}
-           ${q.rewards.gold ? ` · +${q.rewards.gold}💰` : ''}
+           ${formatCoins(q.rewards) ? ` · 💰 ${formatCoins(q.rewards)}` : ''}
            ${Array.isArray(q.rewards.items) && q.rewards.items.length ? ' · ' + q.rewards.items.map(esc).join(', ') : ''}
          </div>`
       : '';
@@ -1249,13 +1270,13 @@ async function doSheet() {
       <div class="ability-header">
         <span class="ability-name" style="color:${statusColor}">${statusIcon} ${t.icon} ${esc(q.name || '—')}</span>
       </div>
-      <div style="font-size:11px;color:${statusColor};margin-bottom:4px">${t.label}${q.giver ? ' · от ' + esc(q.giver) : ''}${q.location ? ' · ' + esc(q.location) : ''}</div>
+      <div style="font-size:11px;color:${statusColor};margin-bottom:4px">${offered ? 'Предложен · ' : ''}${t.label}${q.giver ? ' · от ' + esc(q.giver) : ''}${q.location ? ' · ' + esc(q.location) : ''}</div>
       <div>${stages || '<div style="font-size:12px;color:var(--text-secondary);font-style:italic">— нет этапов —</div>'}</div>
       ${rewards}
     </div>`;
   }
 
-  const activeQuests = quests.filter(q => q.status === 'active');
+  const activeQuests = quests.filter(q => ['active', 'offered'].includes(q.status));
   const completedQuests = quests.filter(q => q.status === 'completed' || q.status === 'failed');
   const questsBlock = activeQuests.length
     ? activeQuests.map(renderQuest).join('')
@@ -1316,7 +1337,7 @@ async function doSheet() {
     <div class="kv"><span class="k">Уровень</span><span class="v">${state.level}${state.level_pending ? ` · повышение доступно (${state.level_pending})` : ''}</span></div>
     <div class="kv"><span class="k">Опыт</span><span class="v">${state.xp} / ${state.xp_next}</span></div>
     <div class="kv"><span class="k">Здоровье</span><span class="v">${state.hp} / ${state.max_hp}</span></div>
-    <div class="kv"><span class="k">Золото</span><span class="v">${state.gold}</span></div>
+    <div class="kv"><span class="k">Монеты</span><span class="v">${formatCoins(state, true)}</span></div>
     <h3 style="margin-top:12px;font-size:15px">Характеристики</h3>
     <div class="stats-grid">${['str','dex','con','int','wis','cha'].map(k =>
       `<div class="stat-box"><div class="lbl">${k.toUpperCase()}</div><div class="val">${s[k] || 10}</div><div class="mod">${statMod(s[k] || 10)}</div></div>`
@@ -1525,6 +1546,7 @@ function fmtSize(bytes) {
 }
 
 async function doSave(name) {
+  if (busy) return;
   if (!name) {
     name = await promptModal('Название сохранения', 'game-' + Date.now());
     if (!name) return;
@@ -1631,9 +1653,10 @@ function savesModal() {
 }
 
 async function doLoad(name) {
+  if (busy) return;
   if (!name) {
     name = await savesModal();
-    if (!name) return;
+    if (!name || busy) return;
   }
   try {
     const res = await fetch('/api/load/' + encodeURIComponent(name));
@@ -1743,6 +1766,7 @@ function doTransfer() {
   };
 
   document.getElementById('transfer-apply').onclick = () => {
+    if (busy) { showInfo('Дождитесь завершения хода.', true); return; }
     const raw = area.value.trim();
     if (!raw) { showInfo('Поле пустое.', true); return; }
     if (raw === current) { showInfo('Это ваша текущая партия — менять нечего.'); return; }
