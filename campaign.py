@@ -1,0 +1,256 @@
+"""Saved scene, pending checks, and deterministic dice resolution."""
+
+import re
+from hashlib import sha256
+from uuid import uuid4
+
+ROLL_COMMAND = re.compile(r"/roll\s+((?:\d*)d\d+(?:k[hl]\d+)?(?:[+-]\d+)?)", re.I)
+DICE_PARTS = re.compile(r"(\d*)d(\d+)(?:(k[hl])(\d+))?([+-]\d+)?", re.I)
+DIFFICULTY = re.compile(r"(?:\bDC|КД|КЗ)\s*[*: ]*(\d+)", re.I)
+KINDS = {"check", "attack", "save", "damage", "heal", "initiative"}
+SCENE_FIELDS = ("id", "location", "time", "participants", "goal", "situation")
+FACT_FIELDS = ("id", "subject", "detail", "source", "holder", "status")
+FACT_STATUSES = {"confirmed", "reported", "suspected", "resolved"}
+
+
+def _text(value, limit=180):
+    return value.strip()[:limit] if isinstance(value, str) else ""
+
+
+def formula_key(expr):
+    if not isinstance(expr, str):
+        return None
+    match = DICE_PARTS.fullmatch(expr.strip())
+    if not match:
+        return None
+    count, sides, keep, keep_count, bonus = match.groups()
+    if any(len(value or "") > 8 for value in (count, sides, keep_count, bonus)):
+        return None
+    count, sides = int(count or 1), int(sides)
+    keep_count = int(keep_count or count)
+    if not (1 <= count <= 100 and 2 <= sides <= 1000 and 1 <= keep_count <= count):
+        return None
+    return count, sides, (keep or "").lower(), keep_count, int(bonus or 0)
+
+
+def pending_check(reply, proposed=None, scene=None):
+    """A check must be announced in the actual reply. Older replies can be inferred."""
+    if not isinstance(reply, str):
+        return None
+    commands = list(ROLL_COMMAND.finditer(reply))
+    if len(commands) != 1:
+        return None
+    command = commands[0]
+    formula = command[1].lower()
+    if formula_key(formula) is None:
+        return None
+    nearby = reply[max(0, command.start() - 470):command.start()].replace("*", "")
+    targets = list(DIFFICULTY.finditer(nearby))
+    dc = int(targets[-1][1]) if targets else None
+    suggested = proposed if isinstance(proposed, dict) else {}
+    title = _text(suggested.get("title"))
+    kind = suggested.get("kind")
+    label = (title or nearby[-230:]).casefold()
+    if not isinstance(kind, str) or kind not in KINDS:
+        last_dc = targets[-1].start() if targets else -1
+        tail = nearby.lower()
+        if tail.rfind("урон") > last_dc and ("брось урон" in tail or "урон арбалета" in tail):
+            kind = "damage"
+        elif dc is not None:
+            if "спасброс" in label:
+                kind = "save"
+            elif any(marker in label for marker in ("атак", "выпад", "укус")):
+                kind = "attack"
+            else:
+                kind = "check"
+        elif any(marker in label for marker in ("лечен", "второе дыхание", "восстанавлива")):
+            kind = "heal"
+        elif "инициатив" in label:
+            kind = "initiative"
+        elif "урон" in label:
+            kind = "damage"
+        else:
+            return None
+    if kind == "damage" and dc is not None:
+        # The previous comparison can be quoted in a request for damage.
+        if not suggested and nearby.rfind("урон") < targets[-1].start():
+            kind = "attack"
+    if kind in {"check", "attack", "save"} and (dc is None or not 1 <= dc <= 100):
+        return None
+    if kind not in {"check", "attack", "save"}:
+        dc = None
+    effect = suggested.get("effect")
+    ability = _text(suggested.get("ability"), 100)
+    if kind == "heal" and "второе дыхание" in (label + nearby.casefold()):
+        ability = "Второе дыхание"
+    if kind == "damage" and effect != "hero_damage" and not suggested:
+        if re.search(r"попада\w+ в (?:тебя|рагара)", nearby, re.I):
+            effect = "hero_damage"
+    if kind == "damage" and "дыхани" in (label + nearby.casefold()) and "дракон" in nearby.casefold():
+        ability = "Дыхание дракона"
+    return {
+        "id": uuid4().hex,
+        "scene_id": _text((scene or {}).get("id"), 80),
+        "kind": kind,
+        "title": title or _text(nearby, 180),
+        "description": _text(nearby[-440:], 440),
+        "target": _text(suggested.get("target"), 100),
+        "dc": dc,
+        "expr": formula,
+        "effect": effect if (kind, effect) in (("damage", "hero_damage"), ("heal", "hero_heal")) else "",
+        "ability": ability,
+    }
+
+
+def active_check(state, messages):
+    if "pending_check" in state:
+        value = state["pending_check"]
+        return value if isinstance(value, dict) else None
+    last = messages[-1] if messages else {}
+    if not isinstance(last, dict) or last.get("role") != "assistant":
+        return None
+    check = pending_check(last.get("content"))
+    if check:
+        # Legacy saves have only the announcement text. Its ID must survive retry and reload.
+        check["id"] = sha256(last["content"].encode()).hexdigest()[:32]
+    return check
+
+
+def roll_result(check, roll):
+    """Recalculate the total and resolve comparison from saved values."""
+    if not isinstance(roll, dict):
+        return None
+    key = formula_key(roll.get("expr"))
+    if not key:
+        raise ValueError("Не удалось прочитать формулу броска.")
+    if check and (roll.get("check_id") != check.get("id") or key != formula_key(check.get("expr"))):
+        raise ValueError("Этот бросок относится к другой проверке.")
+    if not check and roll.get("check_id"):
+        raise ValueError("Эта проверка уже завершена или заменена.")
+    count, sides, mode, keep_count, bonus = key
+    dice = roll.get("rolls")
+    if not isinstance(dice, list) or len(dice) != count or any(
+        type(value) is not int or not 1 <= value <= sides for value in dice
+    ):
+        raise ValueError("Не удалось прочитать выпавшие кубики.")
+    kept = sorted(dice, reverse=mode == "kh")[:keep_count] if mode else dice
+    result = {"expr": roll["expr"], "rolls": dice, "kept": kept, "mod": bonus, "total": sum(kept) + bonus}
+    if check:
+        result["check"] = check
+        dc = check.get("dc")
+        if type(dc) is int:
+            result["success"] = result["total"] >= dc
+    return result
+
+
+def rules_result(state, result):
+    """Apply only effects that were explicitly declared for the player character."""
+    if not result or not result.get("check"):
+        return {}
+    check = result["check"]
+    effect = check.get("effect")
+    second_wind = check.get("kind") == "heal" and check.get("ability", "").casefold() == "второе дыхание"
+    if effect not in {"hero_damage", "hero_heal"} and not second_wind:
+        return {}
+    hp = state.get("hp", 0)
+    max_hp = state.get("max_hp", 1)
+    if type(hp) is not int or type(max_hp) is not int:
+        return {}
+    amount = max(0, result["total"])
+    after = max(0, min(max_hp, hp - amount if effect == "hero_damage" else hp + amount))
+    return {"hp_before": hp, "hp_after": after, "max_hp": max_hp}
+
+
+def merge_scene(previous, update):
+    previous = previous if isinstance(previous, dict) else {}
+    if not isinstance(update, dict):
+        return previous
+    new_location = _text(update.get("location"), 360)
+    moved = bool(new_location and new_location != previous.get("location"))
+    scene = {} if moved else dict(previous)
+    for field in SCENE_FIELDS:
+        if field not in update or field == "id":
+            continue
+        value = update[field]
+        if field == "participants":
+            if isinstance(value, list):
+                scene[field] = [_text(name, 100) for name in value[:16] if _text(name, 100)]
+        elif isinstance(value, str):
+            scene[field] = _text(value, 360)
+    if scene and (not scene.get("id") or scene.get("location") != previous.get("location")):
+        scene["id"] = uuid4().hex
+    return scene
+
+
+def merge_facts(previous, updates):
+    previous = previous if isinstance(previous, list) else []
+    facts = {_text(fact.get("id"), 90).casefold(): fact for fact in previous if isinstance(fact, dict)}
+    for patch in (updates[:12] if isinstance(updates, list) else []):
+        if not isinstance(patch, dict):
+            continue
+        key = _text(patch.get("id"), 90).casefold()
+        if not key:
+            continue
+        entry = dict(facts.pop(key, {}))
+        entry.update({field: _text(patch[field], 340) for field in FACT_FIELDS if isinstance(patch.get(field), str)})
+        entry["id"] = key
+        if entry.get("status") not in FACT_STATUSES:
+            entry["status"] = "reported"
+        if entry.get("subject") and entry.get("detail"):
+            facts[key] = entry
+    return list(facts.values())
+
+
+def notes_context(notes, query):
+    if not isinstance(notes, list):
+        return []
+    words = set(re.findall(r"\w{4,}", query.casefold()))
+    entries = []
+    for note in notes:
+        if not isinstance(note, dict):
+            continue
+        entry = {key: _text(note.get(key), 260) for key in ("title", "content", "source", "type")}
+        keywords = set(re.findall(r"\w{4,}", (entry["title"] + " " + entry["content"]).casefold()))
+        title_words = set(re.findall(r"\w{4,}", entry["title"].casefold()))
+        entries.append((len(words & keywords) + 2 * len(words & title_words), entry))
+    entries.sort(key=lambda item: item[0], reverse=True)
+    return [entry for _, entry in entries[:5]]
+
+
+def facts_context(facts, query):
+    if not isinstance(facts, list):
+        return []
+    words = set(re.findall(r"\w{4,}", query.casefold()))
+    entries = [entry for entry in reversed(facts) if isinstance(entry, dict)]
+    return sorted(entries, key=lambda entry: -len(words.intersection(
+        re.findall(r"\w{4,}", " ".join(str(value) for value in entry.values()).casefold())
+    )))[:12]
+
+
+def ability_key(name):
+    return _text(name, 100).casefold()
+
+
+def apply_ability_event(abilities, name="", rest=""):
+    """Return updated charges and whether a requested use was available."""
+    entries = [dict(entry) if isinstance(entry, dict) else entry for entry in abilities or []]
+    expected = ability_key(name)
+    spent = False
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        maximum = entry.get("uses_max")
+        if type(maximum) is not int or maximum <= 0:
+            continue
+        recharge = entry.get("recharge")
+        if recharge == "passive":
+            continue
+        if (recharge == "short_rest" and rest in {"short_rest", "long_rest"}
+                or recharge == "long_rest" and rest == "long_rest"):
+            entry["uses_left"] = maximum
+        if expected and ability_key(entry.get("name")) == expected:
+            available = entry.get("uses_left", maximum)
+            if not spent and type(available) is int and available > 0:
+                entry["uses_left"] = min(maximum, available) - 1
+                spent = True
+    return entries, spent

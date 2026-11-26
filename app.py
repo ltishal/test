@@ -20,12 +20,18 @@ from urllib.parse import urlsplit
 from uuid import uuid4
 
 from flask import Flask, request, jsonify, Response, render_template, stream_with_context
+from itsdangerous import BadSignature, URLSafeSerializer
 from openai import OpenAI
+
+from campaign import (
+    active_check, apply_ability_event, facts_context, formula_key, merge_facts, merge_scene, notes_context,
+    pending_check, roll_result, rules_result,
+)
 
 from token_usage import TokenUsage, state_turn_id
 
 BASE_DIR = Path(__file__).resolve().parent
-APP_REVISION = "2026-11-25.22"
+APP_REVISION = "2026-11-26.1"
 QWEN_SUMMARY_LIMIT = 480
 QWEN_STATE_LIMIT = 1100
 QWEN_STATE_SETUP_LIMIT = 2200
@@ -89,6 +95,8 @@ else:
         )
 
 client = OpenAI(api_key=API_KEY, base_url=BASE_URL, **client_options)
+ROLL_SIGNER = URLSafeSerializer(os.getenv("ROLL_SIGNING_KEY") or API_KEY, salt="rpg-dice-v1")
+TURN_COMPLETE = "\n[[ХОД_ЗАВЕРШЁН]]"
 
 # Без отдельных настроек служебные запросы используют основную модель.
 EXTRACT_MODEL = _model_id((os.getenv("EXTRACT_MODEL") or "").strip() or MODEL)
@@ -535,6 +543,10 @@ LENGTH_NOTE = """
 
 
 STATE_EXTRACT_PROMPT = """
+Сохраняй канон кампании. Для новой сцены или изменений верни scene: {location,time,participants,goal,situation}. Указывай устойчивое название локации. participants — только те, кто сейчас рядом. При смене локации обнови участников, цель и обстановку сцены. Возвращай только изменения. Для подтверждённых событий, показаний, версий и владения уликами верни обновления facts: [{id,subject,detail,source,holder,status}]. Устойчивый id привязан к одному факту или предмету, сохрани его при уточнении и передаче. status: confirmed, reported, suspected или resolved. Для передачи физической улики обнови holder и inventory_remove в том же ходе. Для новой объявленной команды /roll верни pending_check: {kind,title,target,effect,ability}; kind — check, attack, save, damage, heal или initiative. effect только hero_damage для урона персонажу игрока или hero_heal для его лечения. Для урона NPC effect опусти. Формулу и DC сервер получает из реплики. Если игрок явно отменил прежнее действие и мастер подтвердил отмену, верни cancel_check: true.
+Для завершённого отдыха верни rest_event: {kind,evidence}, где kind — short_rest или long_rest, evidence — фраза из новой реплики о завершении отдыха. Для состоявшегося использования умения без отдельного броска верни ability_event: {name,evidence}, где name совпадает с карточкой и evidence описывает применение в этом ходе. Дыхание дракона и Второе дыхание с проверкой расходует сервер. При изменении описания существующего умения сохраняй текущие заряды.
+При покупке верни purchase: {item,quantity,currency,price,evidence}, где item — точное название, quantity — число полученных предметов, currency — gold, silver или copper, price — общая цена, evidence — цитата новой подтверждённой покупки. Для покупки используй только purchase, не возвращай отдельные изменения кошелька или инвентаря.
+
 Обнови лист RPG по последнему ходу. Верни строго JSON только изменённых полей, {} при отсутствии изменений.
 Меняй состояние только по новому результату в последней реплике мастера. Предыдущие реплики и пересказ старых событий служат контекстом. Лист уже учитывает прошлые удары, лечение, покупки и расходы. Изменяй кошелёк и инвентарь лишь при реальном новом обмене, расходе или находке. Пересказ, проверка числа, предложения и суммы до прошлого обмена ничего не меняют. Для существующего героя верни hp_delta (отрицательный урон или положительное лечение) только за новый результат, и hp_event: короткая дословная фраза из последнего ответа, где этот урон или лечение произошли, а не где обсуждается итоговое здоровье. На запросе броска, сверке или пересказе не возвращай hp_delta. При создании используй hp и max_hp. Для изменений инвентаря или монет у существующего героя верни resource_events: {"inventory":"дословная фраза нового получения, траты или передачи", "wallet":"дословная фраза новой оплаты"}. Укажи только затронутые группы. Цифры в пересказе или сверке не являются событиями. xp, xp_next, level, level_pending, xp_event_ids считает сервер.
 Имя, раса, класс и предыстория меняются только по событию. Поля: name, race, class, background, hp, max_hp, gold, silver, copper, stats {str,dex,con,int,wis,cha}. HP не выше max_hp. Базовые характеристики, владения, навыки и умения назначай при создании, беря их из блока [[ЛИСТ]]: строка «📊» — характеристики, «❤️» — hp, уровень, опыт и кошелёк, «🛡» — владения, «🗣» — языки, «🎯» — навыки с суммарным бонусом, «⚡» — активные умения с uses_max, uses_left и recharge (short_rest, long_rest или day), «🌀» — пассивные и постоянные эффекты с recharge passive и без uses_max, «🎒» — инвентарь. Значки и метки [[ЛИСТ]] в лист не переноси. Название умения бери из блока как есть, включая числовой эффект. Инвентарь, кошелёк и характеристики из блока переноси сразу, в том же ходе. Навык {name,bonus,source}; умение {name,description,uses_max,uses_left,recharge}. Трать применения по событию и восстанавливай по отдыху. Для Дыхания дракона спиши одно применение после разрешения урона, а не пока мастер ждёт бросок. Сохраняй полное описание эффекта при изменении только зарядов.
@@ -562,6 +574,7 @@ DEFAULT_STATE = {
     "dc_modifier": 0, "dc_modifier_reasons": [],
     "position": "стоит", "cover": "нет",
     "weapon_in_hand": "", "restrained": False,
+    "scene": {}, "facts": [],
     "level_history": [], "xp_event_ids": [], "quest_xp_awards": [], "level_pending": 0
 }
 
@@ -638,8 +651,9 @@ def _budgeted_dialogue(messages, max_chars, preserve_latest=False):
 
 
 def _dialogue_messages(messages):
-    return [message for message in messages
-            if isinstance(message, dict) and message.get("role") in ("user", "assistant")]
+    return [{"role": message["role"], "content": message["content"]} for message in messages
+            if isinstance(message, dict) and message.get("role") in ("user", "assistant")
+            and isinstance(message.get("content"), str)]
 
 
 def _recent_dialogue(dialogue):
@@ -805,19 +819,36 @@ def _merge_quests(old, changes):
                       if (change.get("id") and quest.get("id") == change["id"])
                       or _quest_name(quest) == name), None)
         if index is None:
-            merged.insert(0, change)
+            item = {**change, "id": change.get("id") or uuid4().hex}
+            if item.get("status") == "completed" and _quest_steps_open(item):
+                item["status"] = "active"
+            merged.insert(0, item)
             continue
         previous = merged.pop(index)
         updated = {**previous, **change, "id": previous.get("id") or change.get("id")}
+        if previous.get("status") in {"completed", "failed"}:
+            updated["status"] = previous["status"]
         if previous.get("rewards"):
             updated["rewards"] = previous["rewards"]
         previous_stages = previous.get("stages")
         changed_stages = change.get("stages")
         if isinstance(previous_stages, list) and previous_stages:
-            if not isinstance(changed_stages, list):
-                updated["stages"] = previous_stages
-            elif len(changed_stages) < len(previous_stages):
-                updated["stages"] = changed_stages + previous_stages[len(changed_stages):]
+            def stage_key(stage):
+                return _quest_name(stage.get("text")) if isinstance(stage, dict) else ""
+
+            patches = {stage_key(stage): stage for stage in (changed_stages or [])
+                       if stage_key(stage)} if isinstance(changed_stages, list) else {}
+            stages = []
+            for stage in previous_stages:
+                key = stage_key(stage)
+                patch = patches.pop(key, None)
+                if key:
+                    stage = dict(stage)
+                    stage["id"] = stage.get("id") or uuid4().hex
+                    if patch and patch.get("done") is True:
+                        stage["done"] = True
+                stages.append(stage)
+            updated["stages"] = stages
         if (previous.get("status") in {"offered", "active"} and updated.get("status") == "completed"
                 and _quest_steps_open(updated)):
             updated["status"] = "active"
@@ -933,11 +964,22 @@ def message_event_id(message, index):
 
 
 def _awards_in_reply(text, allow_inline=False):
+    lines = [line.strip().replace("**", "") for line in text.splitlines()]
+    last = lines[-1] if lines else ""
+    quest = QUEST_AWARD_RE.search(last)
+    if quest and not last.startswith("+"):
+        inline = re.search(r"[.!?]\s+\+\s*(\d{1,7})\s*XP\s*$", last[:quest.start()], re.I)
+        if inline and allow_inline:
+            return [(int(inline[1]), _quest_name(quest[1]))]
     matches = [(int(match[1]), _quest_name(quest[1]) if (quest := QUEST_AWARD_RE.search(match[0])) else "")
                for match in XP_EVENT_RE.finditer(text)]
     inline = INLINE_XP_EVENT_RE.search(text) if allow_inline else None
     if inline:
         matches.append((int(inline[1]), ""))
+    if matches and len(lines) >= 2 and not matches[-1][1]:
+        heading = re.fullmatch(r"Квест «([^»]+)» заверш[её]н[.!]?", lines[-2], re.I)
+        if heading:
+            matches[-1] = (matches[-1][0], _quest_name(heading[1]))
     return matches
 
 
@@ -1076,7 +1118,45 @@ def _grounded_event(evidence, latest):
     return len(phrase) >= 5 and phrase in latest
 
 
-def extract_state(messages, current_state, turn_id=None):
+class StateUnavailable(Exception):
+    pass
+
+
+def _signed_roll(message, state, history):
+    if not message or not isinstance(message.get("roll_receipt"), str):
+        return None
+    try:
+        roll = ROLL_SIGNER.loads(message["roll_receipt"])
+    except BadSignature as exc:
+        raise ValueError("Бросок не удалось подтвердить. Обновите ход и повторите бросок.") from exc
+    return roll_result(active_check(state, history), roll)
+
+
+def _purchase(current, change, latest):
+    if not isinstance(change, dict) or not _grounded_event(change.get("evidence"), latest):
+        return False
+    currency, price, quantity = (change.get(key) for key in ("currency", "price", "quantity"))
+    name = change.get("item")
+    if (currency not in ("gold", "silver", "copper") or type(price) is not int or price <= 0
+            or type(quantity) is not int or quantity <= 0 or not _item_name(name)):
+        raise StateUnavailable("Не удалось сверить цену или количество покупки.")
+    price_before = current.get(currency, 0)
+    if type(price_before) is not int or price_before < price:
+        raise StateUnavailable("В листе недостаточно монет для описанной покупки.")
+    items = list(current.get("inventory") or [])
+    index = next((i for i, item in enumerate(items) if _item_name(item) == _item_name(name)), None)
+    if index is None:
+        items.append({"name": name.strip(), "quantity": quantity})
+    else:
+        item = items[index]
+        item = dict(item) if isinstance(item, dict) else {"name": item}
+        item["quantity"] = item.get("quantity", 1) + quantity
+        items[index] = item
+    current["inventory"], current[currency] = items, price_before - price
+    return True
+
+
+def extract_state(messages, current_state, turn_id=None, result=None):
     current = dict(DEFAULT_STATE)
     if isinstance(current_state, dict):
         current.update(current_state)
@@ -1123,7 +1203,12 @@ def extract_state(messages, current_state, turn_id=None):
         context_messages = context_messages[:-1]
     context = "\n".join(f"{m['role']}: {m['content']}" for m in context_messages if m.get("content"))
     model_state = {key: value for key, value in current.items()
-                   if key not in {"xp_event_ids", "quest_xp_awards", "last_state_event_id", "level_history"}}
+                   if key not in {"xp_event_ids", "quest_xp_awards", "quest_xp_paid_ids",
+                                  "last_state_event_id", "level_history"}}
+    model_state["facts"] = facts_context(current.get("facts"), action + " " + latest)
+    if result:
+        model_state["roll_result"] = result
+        model_state["rule_effect"] = rules_result(current, result)
     if next_upgrade_level is not None:
         model_state["next_upgrade_level"] = next_upgrade_level
     if isinstance(current.get("quests"), list):
@@ -1156,7 +1241,6 @@ def extract_state(messages, current_state, turn_id=None):
     state_limit = QWEN_STATE_SETUP_LIMIT if new_character or next_upgrade_level is not None else QWEN_STATE_LIMIT
     state_options = (_qwen_service_options(EXTRACT_MODEL, state_limit)
                      or {"max_tokens": state_limit})
-    extracted = False
     try:
         with llm_slot() as ok:
             if not ok:
@@ -1172,11 +1256,74 @@ def extract_state(messages, current_state, turn_id=None):
         if getattr(state_choice, "finish_reason", None) == "length":
             raise ValueError("обновление листа обрезано по лимиту")
         new_state = clean_json(state_choice.message.content or "")
-        extracted = True
     except Exception as exc:
         app.logger.warning("Извлечение состояния не удалось: %s", _short_error(exc))
-        new_state = {}
+        raise StateUnavailable("Лист не обновился. Можно повторить сохранение этого хода.") from exc
 
+    campaign_scene = merge_scene(current.get("scene"), new_state.pop("scene", None))
+    campaign_facts = merge_facts(current.get("facts"), new_state.pop("facts", None))
+    proposed = new_state.pop("pending_check", None)
+    cancel_check = new_state.pop("cancel_check", None) is True
+    action_index = last_index - 1
+    history = messages[:max(0, action_index)]
+    previous_check = active_check(current, history)
+    next_check = pending_check(latest, proposed, campaign_scene)
+    if next_check and last_event_id:
+        next_check["id"] = last_event_id[:32]
+    if not cancel_check and previous_check and not result:
+        # An unrelated answer may restate the same check. Keep its ID and formula.
+        if not next_check or next_check["scene_id"] == previous_check.get("scene_id"):
+            next_check = previous_check
+    previous_scene = current.get("scene")
+    if (isinstance(previous_scene, dict) and previous_scene.get("location")
+            and campaign_scene.get("location") != previous_scene["location"]):
+        new_state.setdefault("position", "стоит")
+        new_state.setdefault("cover", "нет")
+    new_state["scene"] = campaign_scene
+    new_state["facts"] = campaign_facts
+    rest_event = new_state.pop("rest_event", None)
+    ability_event = new_state.pop("ability_event", None)
+    rest = (rest_event.get("kind") if isinstance(rest_event, dict)
+            and _grounded_event(rest_event.get("evidence"), latest) else "")
+    used_ability = (ability_event.get("name") if isinstance(ability_event, dict)
+                    and _grounded_event(ability_event.get("evidence"), latest) else "")
+    resolved_check = result.get("check", {}) if result else {}
+    resolved_check = resolved_check or {}
+    if resolved_check.get("kind") == "damage" and resolved_check.get("ability") == "Дыхание дракона":
+        used_ability = "Дыхание дракона"
+    if (next_check and next_check != previous_check and next_check.get("kind") == "heal"
+            and next_check.get("ability") == "Второе дыхание"):
+        used_ability = "Второе дыхание"
+        next_check["charge_spent"] = True
+        if "воин" in str(current.get("class", "")).casefold() and not new_character:
+            next_check["expr"] = f"1d10+{current.get('level', 1)}"
+    elif resolved_check.get("kind") == "heal" and resolved_check.get("ability") == "Второе дыхание":
+        used_ability = "" if resolved_check.get("charge_spent") else "Второе дыхание"
+    if not new_character:
+        rest = rest if rest in ("short_rest", "long_rest") else ""
+        used_ability = used_ability if isinstance(used_ability, str) else ""
+        before_abilities = current.get("abilities") or []
+        changed_abilities = new_state.get("abilities")
+        if isinstance(changed_abilities, list):
+            existing = {_item_name(entry): entry for entry in before_abilities if isinstance(entry, dict)}
+            for entry in changed_abilities:
+                if not isinstance(entry, dict):
+                    continue
+                previous = existing.get(_item_name(entry))
+                if previous:
+                    for field in ("uses_left", "uses_max", "recharge"):
+                        entry.pop(field, None)
+        abilities, spent = apply_ability_event(before_abilities, used_ability, rest)
+        if used_ability and not spent:
+            raise StateUnavailable(f"Умение «{used_ability}» сейчас недоступно.")
+        current["abilities"] = abilities
+
+    purchase = new_state.pop("purchase", None)
+    if purchase and not new_character:
+        if not _purchase(current, purchase, latest):
+            raise StateUnavailable("Покупку не удалось подтвердить по ответу мастера.")
+        for field in ("inventory", "inventory_remove", "gold", "silver", "copper"):
+            new_state.pop(field, None)
     resources = new_state.pop("resource_events", {})
     resources = resources if isinstance(resources, dict) else {}
     if not new_character:
@@ -1191,9 +1338,10 @@ def extract_state(messages, current_state, turn_id=None):
     if isinstance(inventory, list):
         current["inventory"] = _remove_inventory_items(inventory, new_state.get("inventory_remove"))
     merged = dict(current)
+    merged["pending_check"] = next_check
     for k, v in new_state.items():
         if v is not None and k not in {"inventory_remove", "level_upgrade", "level_history", "hp_delta", "hp_event",
-                                          "quests", "quest_xp_awards", "last_state_event_id"}:
+                                          "quests", "quest_xp_awards", "quest_xp_paid_ids", "last_state_event_id"}:
             merged[k] = v
     if isinstance(current.get("stats"), dict) and isinstance(new_state.get("stats"), dict):
         merged["stats"] = {**current["stats"], **new_state["stats"]}
@@ -1242,14 +1390,28 @@ def extract_state(messages, current_state, turn_id=None):
     processed = [event for event in current["xp_event_ids"] if isinstance(event, str)]
     paid = current.get("quest_xp_awards")
     paid = {name for name in paid if isinstance(name, str)} if isinstance(paid, list) else set()
+    paid_ids = current.get("quest_xp_paid_ids")
+    paid_ids = {value for value in paid_ids if isinstance(value, str)} if isinstance(paid_ids, list) else set()
     quests_by_name = {_quest_name(quest): quest for quest in merged["quests"]}
+    paid_ids.update(quest["id"] for name, quest in quests_by_name.items()
+                    if name in paid and isinstance(quest.get("id"), str))
+    old_completed = {_quest_name(quest) for quest in old_quests or []
+                     if isinstance(quest, dict) and quest.get("status") == "completed"}
+    newly_completed = {
+        name: quest for name, quest in quests_by_name.items()
+        if name and name not in old_completed and quest.get("status") == "completed" and not _quest_steps_open(quest)
+    }
     for event_id, awards in fresh_events:
-        if not extracted and any(name for _, name in awards):
-            continue
         for amount, name in awards:
+            if not name and event_id == last_event_id and len(newly_completed) == 1:
+                candidate, quest = next(iter(newly_completed.items()))
+                reward = quest.get("rewards")
+                if isinstance(reward, dict) and reward.get("xp") == amount:
+                    name = candidate
             if name:
                 quest = quests_by_name.get(name)
-                if (name in paid or not quest or quest.get("status") != "completed"
+                if (name in paid or not quest or str(quest.get("id", "")) in paid_ids
+                        or quest.get("status") != "completed"
                         or _quest_steps_open(quest)):
                     continue
                 reward = quest.get("rewards")
@@ -1257,10 +1419,22 @@ def extract_state(messages, current_state, turn_id=None):
                 if type(promised) is int and promised > 0:
                     amount = promised
                 paid.add(name)
+                if isinstance(quest.get("id"), str):
+                    paid_ids.add(quest["id"])
             xp += amount
         processed.append(event_id)
+    for name, quest in newly_completed.items():
+        reward = quest.get("rewards")
+        promised = reward.get("xp") if isinstance(reward, dict) else None
+        if (name not in paid and str(quest.get("id", "")) not in paid_ids
+                and type(promised) is int and promised > 0):
+            xp += promised
+            paid.add(name)
+            if isinstance(quest.get("id"), str):
+                paid_ids.add(quest["id"])
     merged["quest_xp_awards"] = sorted(paid)
-    if last_event_id and extracted:
+    merged["quest_xp_paid_ids"] = sorted(paid_ids)
+    if last_event_id:
         merged["last_state_event_id"] = last_event_id
     merged["xp"] = xp
     merged["xp_event_ids"] = processed
@@ -1273,10 +1447,16 @@ def extract_state(messages, current_state, turn_id=None):
         before = int(current.get("hp", 0) or 0)
         delta = new_state.get("hp_delta")
         evidence = new_state.get("hp_event")
-        grounded = _grounded_event(evidence, latest)
-        merged["hp"] = before + delta if type(delta) is int and grounded else before
-        if not grounded:
-            merged["max_hp"] = current.get("max_hp", DEFAULT_STATE["max_hp"])
+        applied = rules_result(current, result)
+        grounded = (_grounded_event(evidence, latest) and not any(
+            evidence.strip() in message.get("content", "") for message in history[-8:]
+            if message.get("role") == "assistant"
+        ))
+        if applied:
+            merged["hp"] = applied["hp_after"]
+        else:
+            merged["hp"] = before + delta if type(delta) is int and grounded else before
+        merged["max_hp"] = current.get("max_hp", DEFAULT_STATE["max_hp"])
     merged["hp"] = max(0, min(int(merged.get("hp", 0) or 0), int(merged.get("max_hp", 1) or 1)))
     previous_level = max(1, int(current.get("level", 1) or 1))
     derived_level = level_for_xp(merged["xp"])
@@ -1444,7 +1624,18 @@ def api_presence():
 def api_roll():
     data = request.get_json(silent=True) or {}
     try:
-        return jsonify(roll_dice(data.get("expr", "")))
+        state, messages = data.get("state") or {}, data.get("messages") or []
+        if not isinstance(state, dict) or not isinstance(messages, list):
+            raise ValueError("Не удалось прочитать состояние проверки.")
+        check = active_check(state, messages)
+        expression = data.get("expr") or (check["expr"] if check else "1d20")
+        if check and formula_key(expression) != formula_key(check["expr"]):
+            raise ValueError(f"Ожидается бросок {check['expr']}. Сначала разрешите проверку.")
+        roll = roll_dice(expression)
+        roll["check_id"] = check["id"] if check else None
+        result = roll_result(check, roll)
+        result["receipt"] = ROLL_SIGNER.dumps(roll)
+        return jsonify(result)
     except ValueError as e:
         return jsonify({"error": str(e)}), 400
 
@@ -1455,8 +1646,10 @@ def api_chat():
     data = request.get_json(silent=True) or {}
     messages = data.get("messages") or []
     game_state = data.get("state") or DEFAULT_STATE
-    if not isinstance(messages, list) or not messages:
-        return jsonify({"error": "empty messages"}), 400
+    if not isinstance(messages, list) or not messages or any(
+        not isinstance(message, dict) or not isinstance(message.get("content"), str) for message in messages
+    ):
+        return jsonify({"error": "История хода повреждена."}), 400
     if not isinstance(game_state, dict):
         game_state = DEFAULT_STATE
     setup_turn = bool(game_state.get("character_setup_pending")
@@ -1466,7 +1659,28 @@ def api_chat():
         if setup_turn:
             prompt += CHARACTER_CREATION_RULES
         messages = [{"role": "system", "content": prompt}] + messages
+    action = messages[-1]
+    history = messages[:-1]
+    check = active_check(game_state, history)
+    try:
+        result = _signed_roll(action, game_state, history)
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 409
     state_context = {key: game_state[key] for key in STATE_FIELDS if key in game_state}
+    query = str(action.get("content", ""))
+    scene = game_state.get("scene")
+    state_context["scene"] = scene if isinstance(scene, dict) else {}
+    lookup = " ".join((query, check.get("title", "") if check else "",
+                       str(state_context["scene"].get("goal", ""))))
+    state_context["facts"] = facts_context(game_state.get("facts"), lookup)
+    state_context["journal"] = notes_context(game_state.get("notes"), lookup)
+    if result:
+        state_context["roll_result"] = result
+        state_context["rule_effect"] = rules_result(game_state, result)
+    elif check:
+        state_context["pending_check"] = check
+    if not result and query.startswith("[[БРОСОК]]"):
+        return jsonify({"error": "Используйте команду /roll или кнопку проверки."}), 409
     next_upgrade_level = _next_upgrade_level(game_state)
     if next_upgrade_level is not None:
         state_context["next_upgrade_level"] = next_upgrade_level
@@ -1483,6 +1697,9 @@ def api_chat():
             entry = {key: ability[key] for key in ("name", "uses_left", "uses_max", "recharge") if key in ability}
             description = ability.get("description")
             if isinstance(description, str) and description.strip() and descriptions_left:
+                if (ability["name"].casefold() == "второе дыхание"
+                        and "воин" in str(game_state.get("class", "")).casefold()):
+                    description = f"Восстановить 1d10+{game_state.get('level', 1)} HP."
                 excerpt = description.strip()[:min(180, descriptions_left)]
                 entry["description"] = excerpt
                 descriptions_left -= len(excerpt)
@@ -1510,7 +1727,12 @@ def api_chat():
             state_context.pop(field, None)
     # При создании героя структуру ответа задаёт CHARACTER_CREATION_RULES,
     # поэтому блок двух абзацев не подмешиваем.
-    length_note = "" if setup_turn else "\n\n" + LENGTH_NOTE
+    turn_rule = ("Используй roll_result как окончательный результат именно указанной проверки. "
+                 "Если указан rule_effect, используй рассчитанный HP и не применяй изменение повторно. "
+                 "Свободный бросок без check не разрешает действие. При pending_check сохраняй "
+                 "ожидание, пока игрок не бросит или явно не отменит действие. "
+                 "scene — актуальная локация и участники, facts и journal — канон с источниками.")
+    length_note = "" if setup_turn else "\n\n" + turn_rule + "\n\n" + LENGTH_NOTE
     state_note = STATE_NOTE_SETUP if setup_turn else STATE_NOTE
     messages = messages[:1] + [{
         "role": "system",
@@ -1541,7 +1763,6 @@ def api_chat():
             if setup_turn:
                 # Создание героя отдаём целиком: обрыв на середине листа показал бы
                 # половину карточки, а «дописать» уже отправленный текст нельзя.
-                best = ""
                 for limit, effort in ((NARRATION_SETUP_TOKENS, CHAT_REASONING_EFFORT),
                                       (NARRATION_RETRY_TOKENS, NARRATION_RETRY_EFFORT)):
                     attempts += 1
@@ -1566,13 +1787,12 @@ def api_chat():
                                        getattr(response, "model", None) or MODEL, usage)
                     if diag.get("reasoning_rejected"):
                         _REASONING_STATE["fix"] = ""
-                    if text:
-                        best = text
-                    if text and _sheet_closed(text):
+                    if text and _sheet_closed(text) and finish != "length":
                         if attempts > 1 and not diag.get("reasoning_rejected"):
                             _REASONING_STATE["fix"] = effort or ""
                         emitted = True
                         yield text
+                        yield TURN_COMPLETE
                         return
                     print(
                         f"[chat] лист не закрыт: попытка={attempts} limit={limit} "
@@ -1580,15 +1800,6 @@ def api_chat():
                         f"reasoning_tokens={getattr(getattr(usage, 'completion_tokens_details', None), 'reasoning_tokens', None)}",
                         flush=True,
                     )
-                if best:
-                    # Обе попытки оборвались: закрываем метку сами, чтобы карточка
-                    # всё-таки отрисовалась, а не осталась сырым текстом.
-                    if not _sheet_closed(best):
-                        best += "\n[[/ЛИСТ]]"
-                        print("[chat] лист закрыт принудительно", flush=True)
-                    emitted = True
-                    yield best
-                    return
                 yield ("\n[Ошибка API: модель не вернула текст. Обычно это значит, что "
                        "весь лимит вывода ушёл на скрытые рассуждения. Отправьте сообщение "
                        "ещё раз; если повторяется — задайте в Railway CHAT_REASONING_EFFORT=none "
@@ -1661,16 +1872,17 @@ def api_chat():
                         if usage is not None:
                             last_usage = usage
                         TOKEN_USAGE.record(turn_id, "chat", model, usage)
-                if emitted and finish == "length":
-                    print(f"[chat] ответ обрезан по лимиту: limit={limit} "
-                          f"effort={effort or '—'}", flush=True)
+                if emitted and finish != "stop":
+                    yield "\n[Ошибка API: ответ мастера оборвался. Ход можно повторить.]"
+                    return
                 if diag.get("reasoning_rejected"):
                     _REASONING_STATE["fix"] = ""
                 if emitted:
                     if not diag.get("reasoning_rejected") and attempts > 1:
                         # Запоминаем рабочие параметры, чтобы не платить за повтор каждый ход.
                         _REASONING_STATE["fix"] = effort or ""
-                    break
+                    yield TURN_COMPLETE
+                    return
                 print(
                     f"[chat] пустой ответ: попытка={attempts} limit={limit} "
                     f"effort={effort or '—'} finish={finish} content_chars={content_chars} "
@@ -1706,10 +1918,25 @@ def api_state():
     data = request.get_json(silent=True) or {}
     messages = data.get("messages") or []
     state = data.get("state") or DEFAULT_STATE
-    if not isinstance(messages, list) or not messages:
-        return jsonify(state)
+    if (not isinstance(state, dict) or not isinstance(messages, list) or not messages
+            or any(not isinstance(message, dict) or not isinstance(message.get("content"), str)
+                   for message in messages)):
+        return jsonify({"error": "История хода или лист повреждены."}), 400
     turn_id = state_turn_id(request.headers.get("X-Turn-Id"))
-    updated = extract_state(messages, state, turn_id)
+    last = messages[-1]
+    if not isinstance(last, dict) or last.get("role") != "assistant":
+        return jsonify({"error": "У хода отсутствует завершённый ответ мастера."}), 400
+    last_id = message_event_id(last, len(messages) - 1)
+    if state.get("last_state_event_id") == last_id:
+        return jsonify(state)
+    try:
+        action = messages[-2] if len(messages) > 1 and messages[-2].get("role") == "user" else None
+        result = _signed_roll(action, state, messages[:-2])
+        updated = extract_state(messages, state, turn_id, result)
+    except StateUnavailable as exc:
+        return jsonify({"error": str(exc)}), 503
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 409
     _schedule_summary(messages, _header_token("X-Session-Id", 64), turn_id)
     return jsonify(updated)
 
@@ -1728,7 +1955,7 @@ def api_save():
     data = request.get_json(silent=True) or {}
     name = _safe_name(data.get("name")) or "default"
     path = _save_path(_client_id(), name)
-    payload = {"schema_version": 2, "messages": data.get("messages") or [],
+    payload = {"schema_version": 3, "messages": data.get("messages") or [],
                "state": data.get("state") or DEFAULT_STATE}
     serialized = json.dumps(payload, ensure_ascii=False, indent=2)
     # Backup previous file before replacing; atomic replace avoids partial JSON on crash.
