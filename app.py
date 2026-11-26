@@ -25,7 +25,7 @@ from openai import OpenAI
 from token_usage import TokenUsage, state_turn_id
 
 BASE_DIR = Path(__file__).resolve().parent
-APP_REVISION = "2026-11-25.21"
+APP_REVISION = "2026-11-25.22"
 QWEN_SUMMARY_LIMIT = 480
 QWEN_STATE_LIMIT = 1100
 QWEN_STATE_SETUP_LIMIT = 2200
@@ -102,10 +102,11 @@ SUMMARY_MODEL = _model_id((os.getenv("SUMMARY_MODEL") or "").strip() or MODEL)
 FREQ_PENALTY = float(os.getenv("OPENAI_FREQ_PENALTY", "0.15"))
 PRES_PENALTY = float(os.getenv("OPENAI_PRES_PENALTY", "0.0"))
 NARRATION_MAX_TOKENS = max(256, int(os.getenv("NARRATION_MAX_TOKENS", "900")))
-# Создание героя длиннее: блок листа плюс открывающая сцена.
-NARRATION_SETUP_TOKENS = max(NARRATION_MAX_TOKENS, int(os.getenv("NARRATION_SETUP_TOKENS", "1800")))
-# Повтор при пустом ответе: лимит выше, рассуждения выключены.
-NARRATION_RETRY_TOKENS = max(NARRATION_SETUP_TOKENS, int(os.getenv("NARRATION_RETRY_TOKENS", "2000")))
+# Создание героя длиннее: блок листа плюс открывающая сцена. 2200, потому что
+# обрыв на середине листа стоит целого хода.
+NARRATION_SETUP_TOKENS = max(NARRATION_MAX_TOKENS, int(os.getenv("NARRATION_SETUP_TOKENS", "2200")))
+# Повтор при пустом или оборванном ответе: лимит выше, рассуждения выключены.
+NARRATION_RETRY_TOKENS = max(NARRATION_SETUP_TOKENS, int(os.getenv("NARRATION_RETRY_TOKENS", "2600")))
 NARRATION_RETRY_EFFORT = (os.getenv("NARRATION_RETRY_EFFORT") or "none").strip()
 # Необязательно: "none", "minimal" или "low" — если модель тратит вывод на рассуждения.
 CHAT_REASONING_EFFORT = (os.getenv("CHAT_REASONING_EFFORT") or "").strip()
@@ -235,25 +236,26 @@ def _qwen_service_options(model, limit):
     return {"extra_body": {"reasoning_effort": "none", "max_completion_tokens": limit}}
 
 
-def _start_stream(messages, *, max_tokens=None, reasoning_effort=None, diag=None):
-    """Поддерживает провайдеры, отклоняющие штрафы, лимит вывода, рассуждения
-    или потоковый учёт токенов."""
-    limit = NARRATION_MAX_TOKENS if max_tokens is None else max_tokens
-    options = dict(model=MODEL, messages=messages, stream=True,
-                   stream_options={"include_usage": True},
-                   max_tokens=limit)
+def _narration_options(messages, limit, stream, reasoning_effort):
+    """Общие параметры рассказа: и для потока, и для готового ответа."""
+    options = dict(model=MODEL, messages=messages, max_tokens=limit)
+    if stream:
+        options.update(stream=True, stream_options={"include_usage": True})
     if _is_yandex_qwen(MODEL):
         # Use Qwen's non-thinking sampling profile for narration.
         options.pop("max_tokens", None)
         options.update(temperature=0.7, top_p=0.8,
-                       extra_body={"reasoning_effort": "none",
-                                   "max_completion_tokens": limit})
+                       extra_body={"reasoning_effort": "none", "max_completion_tokens": limit})
     else:
         options.update(temperature=0.8, frequency_penalty=FREQ_PENALTY,
                        presence_penalty=PRES_PENALTY)
-        effort = CHAT_REASONING_EFFORT if reasoning_effort is None else reasoning_effort
-        if effort:
-            options["extra_body"] = {"reasoning_effort": effort}
+        if reasoning_effort:
+            options["extra_body"] = {"reasoning_effort": reasoning_effort}
+    return options
+
+
+def _create_with_fallback(options, diag=None):
+    """Запрос к модели с откатом по параметрам, которые провайдер не принял."""
     while True:
         try:
             return client.chat.completions.create(**options)
@@ -277,6 +279,24 @@ def _start_stream(messages, *, max_tokens=None, reasoning_effort=None, diag=None
                 del options["presence_penalty"]
             else:
                 raise
+
+
+def _start_stream(messages, *, max_tokens=None, reasoning_effort=None, diag=None):
+    limit = NARRATION_MAX_TOKENS if max_tokens is None else max_tokens
+    effort = CHAT_REASONING_EFFORT if reasoning_effort is None else reasoning_effort
+    return _create_with_fallback(_narration_options(messages, limit, True, effort), diag)
+
+
+def _start_completion(messages, *, max_tokens=None, reasoning_effort=None, diag=None):
+    """Ответ целиком, без потока: нужен там, где обрыв на середине недопустим."""
+    limit = NARRATION_SETUP_TOKENS if max_tokens is None else max_tokens
+    effort = CHAT_REASONING_EFFORT if reasoning_effort is None else reasoning_effort
+    return _create_with_fallback(_narration_options(messages, limit, False, effort), diag)
+
+
+def _sheet_closed(text):
+    """Лист открылся, но не закрылся — ответ оборвался на середине."""
+    return text.count("[[ЛИСТ]]") == text.count("[[/ЛИСТ]]")
 
 
 def _measured_completion(turn_id, stage, **options):
@@ -418,6 +438,8 @@ CHARACTER_CREATION_RULES = """
 
 Выбор игрока, включая авторские варианты, сохраняй дословно: не переименовывай расу, класс и предысторию. Авторские бонусы, названные игроком для своей расы, применяй как есть.
 
+Характеристики считай сам: база по классу плюс расовые бонусы плюс всё, что назвал игрок. Числа из служебного листа не копируй — там заготовка. HP, кошелёк и снаряжение выдай по классу: Колдун получает 2 ячейки заклинаний, лёгкие доспехи, кинжалы и простые инструменты, стартовый кошелёк 10–15 зм.
+
 ════════ СТРУКТУРА ПЕРВОГО ОТВЕТА ════════
 Если раса и класс ещё не названы — сначала предложи 2–3 варианта одним коротким абзацем и дождись выбора. Лист давай только когда раса, класс и предыстория определены.
 
@@ -426,7 +448,7 @@ CHARACTER_CREATION_RULES = """
 [[ЛИСТ]]
 👤 Кейр — эльф · плут · Преступник
 📊 СИЛ 10 (+0) · ЛОВ 17 (+3) · ТЕЛ 12 (+1) · ИНТ 12 (+1) · МДР 10 (+0) · ХАР 10 (+0)
-❤️ HP 10/10 · ⭐ Ур. 1 · Опыт 0/100 · 💰 15 золотых монет
+❤️ HP 10/10 · ⭐ Ур. 1 · Опыт 0/100 · 💰 15 зм
 🛡 Владения: лёгкие доспехи, рапиры, воровские инструменты
 🗣 Языки: общий, эльфийский
 🎯 Навыки: Скрытность +5, Обман +2
@@ -435,7 +457,7 @@ CHARACTER_CREATION_RULES = """
 🎒 Инвентарь: рапира, кожаный доспех, воровские инструменты
 [[/ЛИСТ]]
 
-Метки [[ЛИСТ]] и [[/ЛИСТ]] стоят отдельными строками. Между блоком и рассказом — пустая строка.
+Метки [[ЛИСТ]] и [[/ЛИСТ]] стоят отдельными строками. Все девять строк обязательны: если чего-то нет, поставь пустое значение, но строку дай, иначе карточка игрока останется без раздела. Метка [[/ЛИСТ]] обязательна — без неё блок считается оборванным.
 
 Первая строка — имя, раса, класс, предыстория через «·». Характеристики уже с расовыми бонусами, сокращения СИЛ/ЛОВ/ТЕЛ/ИНТ/МДР/ХАР, модификатор — (значение − 10) // 2. В навыках — каждый навык с суммарным бонусом (мод характеристики плюс мастерство +2 на ур. 1–4).
 
@@ -550,6 +572,12 @@ STATE_FIELDS = ("name", "race", "class", "background", "level", "xp", "xp_next",
 STATE_NOTE = ("[ЛИСТ ПОСЛЕ ПРЕДЫДУЩЕГО ОТВЕТА МАСТЕРА. "
               "Текущий ход игрока ещё не учтён. Используй числа отсюда.]\n")
 
+# На первом ходу лист ещё пуст: числа в state_context — заготовка DEFAULT_STATE,
+# и подсказка «используй числа отсюда» заставляла модель скопировать десятки.
+STATE_NOTE_SETUP = ("[ПЕРСОНАЖ ЕЩЁ НЕ СОЗДАН. Числа заготовки сюда не подставлены. "
+                    "Характеристики с расовыми бонусами, HP, кошелёк и снаряжение "
+                    "назначь сам по расе, классу и предыстории.]\n")
+
 
 KEEP_RECENT = 6
 SUMMARY_BATCH_MESSAGES = 4
@@ -636,11 +664,13 @@ def _messages_with_memory(messages, session_id):
     dialogue = _dialogue_messages(messages)
     parts = [message["content"] for message in messages
              if message.get("role") == "system"
-             and not message["content"].startswith(("[РЕЗЮМЕ ПРОШЛОГО]", STATE_NOTE))]
+             and not message["content"].startswith(
+                 ("[РЕЗЮМЕ ПРОШЛОГО]", STATE_NOTE, STATE_NOTE_SETUP))]
     if summary["text"]:
         parts.append(f"[РЕЗЮМЕ ПРОШЛОГО]\n{summary['text']}")
     parts.extend(message["content"] for message in messages
-                 if message.get("role") == "system" and message["content"].startswith(STATE_NOTE))
+                 if message.get("role") == "system"
+                 and message["content"].startswith((STATE_NOTE, STATE_NOTE_SETUP)))
     system = [{"role": "system", "content": "\n\n".join(parts)}] if parts else []
     # Даже для старого сохранения без резюме ближайшая проверка остаётся целиком.
     tail = _recent_dialogue(dialogue[max(0, min(summary["folded"], len(dialogue) - 3)):])
@@ -1474,12 +1504,17 @@ def api_chat():
         }
         if skill_bonuses:
             state_context["skill_bonuses"] = skill_bonuses
+    if setup_turn:
+        # Пустые числа заготовки только сбивали модель: на первом ходу она их копировала.
+        for field in ("hp", "max_hp", "gold", "silver", "copper", "level", "xp", "xp_next", "stats"):
+            state_context.pop(field, None)
     # При создании героя структуру ответа задаёт CHARACTER_CREATION_RULES,
     # поэтому блок двух абзацев не подмешиваем.
     length_note = "" if setup_turn else "\n\n" + LENGTH_NOTE
+    state_note = STATE_NOTE_SETUP if setup_turn else STATE_NOTE
     messages = messages[:1] + [{
         "role": "system",
-        "content": (STATE_NOTE + json.dumps(state_context, ensure_ascii=False) + length_note),
+        "content": (state_note + json.dumps(state_context, ensure_ascii=False) + length_note),
     }] + messages[1:]
     turn_id = uuid4().hex
     messages = _messages_with_memory(messages, _header_token("X-Session-Id", 64))
@@ -1503,6 +1538,62 @@ def api_chat():
         attempts = 0
         emitted = False
         try:
+            if setup_turn:
+                # Создание героя отдаём целиком: обрыв на середине листа показал бы
+                # половину карточки, а «дописать» уже отправленный текст нельзя.
+                best = ""
+                for limit, effort in ((NARRATION_SETUP_TOKENS, CHAT_REASONING_EFFORT),
+                                      (NARRATION_RETRY_TOKENS, NARRATION_RETRY_EFFORT)):
+                    attempts += 1
+                    diag = {}
+                    response = None
+                    text = ""
+                    try:
+                        response = _start_completion(messages, max_tokens=limit,
+                                                     reasoning_effort=effort, diag=diag)
+                    except Exception as e:
+                        app.logger.exception("Модель недоступна")
+                        hint = _error_hint(e)
+                        yield f"\n[Ошибка API: {_short_error(e)}" + (f" {hint}" if hint else "") + "]"
+                        return
+                    choice = response.choices[0] if getattr(response, "choices", None) else None
+                    message = getattr(choice, "message", None)
+                    text = (getattr(message, "content", "") or "").strip()
+                    finish = getattr(choice, "finish_reason", None)
+                    usage = getattr(response, "usage", None)
+                    last_usage = usage or last_usage
+                    TOKEN_USAGE.record(turn_id, "chat",
+                                       getattr(response, "model", None) or MODEL, usage)
+                    if diag.get("reasoning_rejected"):
+                        _REASONING_STATE["fix"] = ""
+                    if text:
+                        best = text
+                    if text and _sheet_closed(text):
+                        if attempts > 1 and not diag.get("reasoning_rejected"):
+                            _REASONING_STATE["fix"] = effort or ""
+                        emitted = True
+                        yield text
+                        return
+                    print(
+                        f"[chat] лист не закрыт: попытка={attempts} limit={limit} "
+                        f"effort={effort or '—'} finish={finish} chars={len(text)} "
+                        f"reasoning_tokens={getattr(getattr(usage, 'completion_tokens_details', None), 'reasoning_tokens', None)}",
+                        flush=True,
+                    )
+                if best:
+                    # Обе попытки оборвались: закрываем метку сами, чтобы карточка
+                    # всё-таки отрисовалась, а не осталась сырым текстом.
+                    if not _sheet_closed(best):
+                        best += "\n[[/ЛИСТ]]"
+                        print("[chat] лист закрыт принудительно", flush=True)
+                    emitted = True
+                    yield best
+                    return
+                yield ("\n[Ошибка API: модель не вернула текст. Обычно это значит, что "
+                       "весь лимит вывода ушёл на скрытые рассуждения. Отправьте сообщение "
+                       "ещё раз; если повторяется — задайте в Railway CHAT_REASONING_EFFORT=none "
+                       "и перезапустите сервис.]")
+                return
             learned = _REASONING_STATE["fix"]
             variants = [
                 (narration_limit, CHAT_REASONING_EFFORT if learned is None else learned),
@@ -1570,6 +1661,9 @@ def api_chat():
                         if usage is not None:
                             last_usage = usage
                         TOKEN_USAGE.record(turn_id, "chat", model, usage)
+                if emitted and finish == "length":
+                    print(f"[chat] ответ обрезан по лимиту: limit={limit} "
+                          f"effort={effort or '—'}", flush=True)
                 if diag.get("reasoning_rejected"):
                     _REASONING_STATE["fix"] = ""
                 if emitted:
