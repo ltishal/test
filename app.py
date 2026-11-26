@@ -25,7 +25,7 @@ from openai import OpenAI
 from token_usage import TokenUsage, state_turn_id
 
 BASE_DIR = Path(__file__).resolve().parent
-APP_REVISION = "2026-11-25.16"
+APP_REVISION = "2026-11-25.17"
 QWEN_SUMMARY_LIMIT = 480
 QWEN_STATE_LIMIT = 1100
 QWEN_STATE_SETUP_LIMIT = 2200
@@ -97,7 +97,7 @@ SUMMARY_MODEL = _model_id((os.getenv("SUMMARY_MODEL") or "").strip() or MODEL)
 print(
     f"[boot] app_revision={APP_REVISION} | env={_ENV_FILE.name if _ENV_FILE else 'нет (только переменные окружения)'} | "
     f"provider={PROVIDER} | model={MODEL} | base_url={BASE_URL or 'https://api.openai.com/v1'} | "
-    f"timeout={LLM_TIMEOUT:g}s",
+    f"timeout={LLM_TIMEOUT:g}s | narration_max_tokens={NARRATION_MAX_TOKENS}",
     flush=True,
 )
 if BASE_URL and ("127.0.0.1" in BASE_URL or "localhost" in BASE_URL):
@@ -130,8 +130,14 @@ SAVES_DIR = _saves_dir()
 TOKEN_USAGE = TokenUsage(SAVES_DIR / "token_usage.sqlite3")
 app.add_url_rule("/admin/tokens", view_func=TOKEN_USAGE.dashboard)
 
-FREQ_PENALTY = float(os.getenv("OPENAI_FREQ_PENALTY", "0.35"))
-PRES_PENALTY = float(os.getenv("OPENAI_PRES_PENALTY", "0.25"))
+# ─── Длина ответа мастера и бюджет хода ───────────────────────────────────
+# Ориентир: ~7000 токенов на ход (ответ мастера + обновление листа + свёртка).
+# presence_penalty снят: он подталкивал модель к раннему завершению ответа.
+FREQ_PENALTY = float(os.getenv("OPENAI_FREQ_PENALTY", "0.15"))
+PRES_PENALTY = float(os.getenv("OPENAI_PRES_PENALTY", "0.0"))
+NARRATION_MAX_TOKENS = max(256, int(os.getenv("NARRATION_MAX_TOKENS", "900")))
+# Необязательно: "none" или "low" — если модель тратит вывод на скрытые рассуждения.
+CHAT_REASONING_EFFORT = (os.getenv("CHAT_REASONING_EFFORT") or "").strip()
 
 # ─── Лимит параллельных обращений к модели ────────────────────────────────
 # Живёт в памяти процесса: держите РОВНО ОДИН воркер gunicorn,
@@ -217,24 +223,37 @@ def _qwen_service_options(model, limit):
 
 
 def _start_stream(messages):
-    """Поддерживает провайдеры, отклоняющие штрафы или потоковый учёт токенов."""
+    """Поддерживает провайдеры, отклоняющие штрафы, лимит вывода или потоковый учёт токенов."""
     options = dict(model=MODEL, messages=messages, stream=True,
-                   stream_options={"include_usage": True})
+                   stream_options={"include_usage": True},
+                   max_tokens=NARRATION_MAX_TOKENS)
     if _is_yandex_qwen(MODEL):
         # Use Qwen's non-thinking sampling profile for narration.
-        options.update(temperature=0.7, top_p=0.8, extra_body={"reasoning_effort": "none"})
+        options.pop("max_tokens", None)
+        options.update(temperature=0.7, top_p=0.8,
+                       extra_body={"reasoning_effort": "none",
+                                   "max_completion_tokens": NARRATION_MAX_TOKENS})
     else:
-        options.update(temperature=0.9, frequency_penalty=FREQ_PENALTY,
+        options.update(temperature=0.8, frequency_penalty=FREQ_PENALTY,
                        presence_penalty=PRES_PENALTY)
+        if CHAT_REASONING_EFFORT:
+            options["extra_body"] = {"reasoning_effort": CHAT_REASONING_EFFORT}
     while True:
         try:
             return client.chat.completions.create(**options)
         except Exception as exc:
             detail = str(exc).lower()
+            status = getattr(exc, "status_code", None)
             if ("stream_options" in options
-                    and getattr(exc, "status_code", None) in (400, 422, 501)
+                    and status in (400, 422, 501)
                     and any(word in detail for word in ("stream_options", "include_usage"))):
                 del options["stream_options"]
+            elif "max_tokens" in options and "max_tokens" in detail:
+                # Новые модели OpenAI принимают только max_completion_tokens.
+                options["max_completion_tokens"] = options.pop("max_tokens")
+            elif "extra_body" in options and any(
+                    word in detail for word in ("reasoning_effort", "extra_body")):
+                del options["extra_body"]
             elif "frequency_penalty" in options and any(word in detail for word in PENALTY_REJECT):
                 del options["frequency_penalty"]
                 del options["presence_penalty"]
@@ -249,7 +268,8 @@ def _measured_completion(turn_id, stage, **options):
         return response
     finally:
         usage = getattr(response, "usage", None)
-        limit = options.get("extra_body", {}).get("max_completion_tokens")
+        extra = options.get("extra_body") or {}
+        limit = extra.get("max_completion_tokens") or options.get("max_tokens")
         completion_tokens = getattr(usage, "completion_tokens", None)
         if limit is not None and isinstance(completion_tokens, int) and completion_tokens > limit:
             reasoning = getattr(getattr(usage, "completion_tokens_details", None), "reasoning_tokens", None)
@@ -353,7 +373,7 @@ def _client_id():
 SYSTEM_PROMPT = """
 Ты — ИИ-мастер текстовой RPG в жанре тёмного фэнтези, D&D и LitRPG. Веди связное приключение на естественном русском. Управляй миром, NPC и последствиями. Решения, мысли и реплики героя оставляй игроку.
 
-Показывай результат действия и двигай сцену. После провала дай последствие или новый путь вместо повторения той же проверки. Доводи установленные цели до развязки. Не добавляй новую обязательную цель задним числом. Различай подтверждённые факты и догадки. Лист отражает состояние после предыдущего ответа. Используй его числа как старт хода. Уже проведённые удары, лечение, покупки и награды не применяй повторно, даже при уточнении. На вопрос о текущем числе ответь числом из листа, если в этом ходу оно не изменилось. Примеры развития сцены: реакция NPC, зацепка, опасность или новый путь. Одна-две яркие детали сильнее перечня эпитетов. Не пересказывай ход игрока, не нагромождай образы и не повторяй одинаковые детали в соседних сценах. Обычный ход — 2–4 коротких абзаца, важная сцена — до 6, кульминация — до 8. Предел — 8 абзацев.
+Показывай результат действия и двигай сцену. После провала дай последствие или новый путь вместо повторения той же проверки. Доводи установленные цели до развязки. Не добавляй новую обязательную цель задним числом. Различай подтверждённые факты и догадки. Лист отражает состояние после предыдущего ответа. Используй его числа как старт хода. Уже проведённые удары, лечение, покупки и награды не применяй повторно, даже при уточнении. На вопрос о текущем числе ответь числом из листа, если в этом ходу оно не изменилось. Примеры развития сцены: реакция NPC, зацепка, опасность или новый путь. Одна-две яркие детали сильнее перечня эпитетов. Не пересказывай ход игрока, не нагромождай образы и не повторяй одинаковые детали в соседних сценах. Длину и структуру ответа задаёт блок [ФОРМАТ ОТВЕТА].
 Поддерживай канон по листу и памяти. Сохраняй имена, место, условия и награду каждого принятого или предложенного задания. При закрытии сверяй исходные этапы, включая обратную доставку или доклад. Успех части задачи оставляет остальные этапы открытыми. Не смешивай людей и улики из разных мест. Свежие реплики уточняют старое резюме. У важных NPC свои мотивы, тайны и голос. Мир меняется и без героя: держи 1–4 силы с часами 1–6, продвигай их после крупных сцен и показывай последствия через события.
 
 ПРОВЕРКИ И СЛОЖНОСТЬ (DC)
@@ -433,6 +453,13 @@ CHARACTER_CREATION_RULES = """
 Прислужник: Проницательность, Религия; книги, 1 язык.
 """
 
+# Идёт последним блоком системного сообщения: это правило модель видит
+# непосредственно перед ответом, поэтому оно и задаёт длину.
+LENGTH_NOTE = """
+[ФОРМАТ ОТВЕТА — ГЛАВНОЕ ПРАВИЛО ЭТОГО ХОДА]
+Пиши 2 полных абзаца по 4–7 предложений (примерно 900–1400 знаков). Первый: что произошло, как отреагировали NPC и мир, одна-две конкретные детали. Второй: последствия для героя, изменение обстановки и зацепка к следующему шагу. Важная сцена — до 4 абзацев, кульминация — до 6. Ответ в одну-две строки считается ошибкой: если сцена не даёт материала, добавь реакцию мира, деталь окружения и зацепку, но не выдумывай новый обязательный сюжет. Проверку по-прежнему заканчивай запросом броска и без итога. Строку награды (+50 XP — квест «Название») оставляй отдельной последней строкой, а не внутри абзаца.
+"""
+
 
 STATE_EXTRACT_PROMPT = """
 Обнови лист RPG по последнему ходу. Верни строго JSON только изменённых полей, {} при отсутствии изменений.
@@ -476,9 +503,10 @@ STATE_NOTE = ("[ЛИСТ ПОСЛЕ ПРЕДЫДУЩЕГО ОТВЕТА МАСТ
 KEEP_RECENT = 6
 SUMMARY_BATCH_MESSAGES = 4
 SUMMARY_MAX_BATCH_MESSAGES = 32
-RECENT_HISTORY_CHARS = 3200
-SUMMARY_INPUT_CHARS = 3200
+RECENT_HISTORY_CHARS = max(800, int(os.getenv("RECENT_HISTORY_CHARS", "2400")))
+SUMMARY_INPUT_CHARS = max(600, int(os.getenv("SUMMARY_INPUT_CHARS", "1800")))
 STATE_HISTORY_CHARS = 1800
+SUMMARY_MAX_TOKENS = max(128, int(os.getenv("SUMMARY_MAX_TOKENS", "400")))
 SUMMARY_MAX_SESSIONS = int(os.getenv("SUMMARY_MAX_SESSIONS", "128"))
 
 # Резюме прошлого живёт на сервере, по session_id. Клиент его не хранит
@@ -585,6 +613,8 @@ def _refresh_summary(dialogue, session_id, turn_id):
         with llm_slot(timeout=0) as ok:
             if not ok:
                 return
+            limit_options = (_qwen_service_options(SUMMARY_MODEL, QWEN_SUMMARY_LIMIT)
+                             or {"max_tokens": SUMMARY_MAX_TOKENS})
             resp = _measured_completion(
                 turn_id, "summary",
                 model=SUMMARY_MODEL,
@@ -592,7 +622,7 @@ def _refresh_summary(dialogue, session_id, turn_id):
                           {"role": "user", "content": archive}],
                 temperature=0.2,
                 timeout=min(LLM_TIMEOUT, 20),
-                **_qwen_service_options(SUMMARY_MODEL, QWEN_SUMMARY_LIMIT),
+                **limit_options,
             )
         choice = resp.choices[0]
         summary_text = (choice.message.content or "").strip()
@@ -1028,6 +1058,14 @@ def extract_state(messages, current_state, turn_id=None):
             if isinstance(note, dict) else note
             for note in current["notes"]
         ]
+    model_inventory = model_state.get("inventory")
+    if isinstance(model_inventory, list):
+        # Для дельты достаточно имени и количества: описания предметов не нужны.
+        model_state["inventory"] = [
+            {key: item[key] for key in ("name", "quantity") if key in item}
+            if isinstance(item, dict) else item
+            for item in model_inventory
+        ][:40]
     prompt = (f"ТЕКУЩЕЕ СОСТОЯНИЕ:\n{json.dumps(model_state, ensure_ascii=False)}\n\n"
               f"ПРЕДЫДУЩИЙ КОНТЕКСТ (события уже учтены):\n{context}\n\n"
               f"ТЕКУЩЕЕ ДЕЙСТВИЕ ИГРОКА:\n{action}\n\n"
@@ -1035,7 +1073,8 @@ def extract_state(messages, current_state, turn_id=None):
     new_character = (current.get("character_setup_pending")
                      or not (current.get("race") and current.get("class")))
     state_limit = QWEN_STATE_SETUP_LIMIT if new_character or next_upgrade_level is not None else QWEN_STATE_LIMIT
-    state_options = _qwen_service_options(EXTRACT_MODEL, state_limit)
+    state_options = (_qwen_service_options(EXTRACT_MODEL, state_limit)
+                     or {"max_tokens": state_limit})
     extracted = False
     try:
         with llm_slot() as ok:
@@ -1241,6 +1280,12 @@ def api_health():
             "state": QWEN_STATE_LIMIT if _is_yandex_qwen(EXTRACT_MODEL) else None,
             "state_setup": QWEN_STATE_SETUP_LIMIT if _is_yandex_qwen(EXTRACT_MODEL) else None,
         },
+        "narration_max_tokens": NARRATION_MAX_TOKENS,
+        "recent_history_chars": RECENT_HISTORY_CHARS,
+        "summary_input_chars": SUMMARY_INPUT_CHARS,
+        "summary_max_tokens": SUMMARY_MAX_TOKENS,
+        "frequency_penalty": FREQ_PENALTY,
+        "presence_penalty": PRES_PENALTY,
         "provider": PROVIDER,
         "model": MODEL,
         "extract_model": EXTRACT_MODEL,
@@ -1373,7 +1418,12 @@ def api_chat():
         }
         if skill_bonuses:
             state_context["skill_bonuses"] = skill_bonuses
-    messages = messages[:1] + [{"role": "system", "content": STATE_NOTE + json.dumps(state_context, ensure_ascii=False)}] + messages[1:]
+    # Блок формата идёт в самом хвосте системного сообщения — прямо перед диалогом.
+    messages = messages[:1] + [{
+        "role": "system",
+        "content": (STATE_NOTE + json.dumps(state_context, ensure_ascii=False)
+                    + "\n\n" + LENGTH_NOTE),
+    }] + messages[1:]
     turn_id = uuid4().hex
     messages = _messages_with_memory(messages, _header_token("X-Session-Id", 64))
 
@@ -1429,7 +1479,8 @@ def api_chat():
                 print(
                     f"[chat] queue_ms={round((slot_at - queued_at) * 1000)} "
                     f"first_text_ms={round((first_text_at - started_at) * 1000) if first_text_at is not None else '-'} "
-                    f"response_ms={round((perf_counter() - started_at) * 1000)}",
+                    f"response_ms={round((perf_counter() - started_at) * 1000)} "
+                    f"output_tokens={getattr(usage, 'completion_tokens', '-')}",
                     flush=True,
                 )
 
