@@ -332,3 +332,85 @@ def apply_ability_event(abilities, name="", rest=""):
                 entry["uses_left"] = min(maximum, available) - 1
                 used = True
     return entries, used
+
+
+WAIT_COMMAND = re.compile(r"/wait\s+(next|dawn|noon|evening|[1-9]\d{0,3})", re.I)
+PLAIN_WAIT = re.compile(
+    r"(?:я )?(?:жду|ожидаю|пропускаю время) до (рассвета|полудня|вечера|ближайшего события)[.!]?", re.I,
+)
+WAIT_WORDS = {"рассвета": "dawn", "полудня": "noon", "вечера": "evening", "ближайшего события": "next"}
+
+
+def campaign_minute(state):
+    minute = state.get("world_minute")
+    if type(minute) is int and minute >= 0:
+        return minute
+    scene = state.get("scene")
+    label = (scene.get("time") or "").casefold() if isinstance(scene, dict) and isinstance(scene.get("time"), str) else ""
+    for word, minute in (("рассвет", 360), ("утр", 540), ("полд", 720),
+                         ("сумерк", 1140), ("вечер", 1140), ("ноч", 1320), ("день", 960)):
+        if word in label:
+            return minute
+    return None
+
+
+def clock_label(minute):
+    day, remainder = divmod(minute, 1440)
+    hour, minute = divmod(remainder, 60)
+    return f"День {day + 1}, {hour:02d}:{minute:02d}"
+
+
+def update_agenda(state, patches, resolutions, minute, grounded):
+    stored = state.get("agenda")
+    events = {event["id"]: dict(event) for event in stored
+              if isinstance(event, dict) and isinstance(event.get("id"), str)} if isinstance(stored, list) else {}
+    for patch in patches if isinstance(patches, list) else []:
+        if not isinstance(patch, dict) or not grounded(patch.get("evidence")):
+            continue
+        key = _text(patch.get("id"), 100).casefold()
+        title = _text(patch.get("title"), 160)
+        delay = patch.get("in_minutes")
+        if not key or key in events or not title or type(delay) is not int or not 1 <= delay <= 10080:
+            continue
+        events[key] = {"id": key, "title": title, "location": _text(patch.get("location"), 160),
+                       "due": minute + delay, "status": "scheduled"}
+    for patch in resolutions if isinstance(resolutions, list) else []:
+        if not isinstance(patch, dict) or not grounded(patch.get("evidence")):
+            continue
+        event = events.get(_text(patch.get("id"), 100).casefold())
+        outcome = _text(patch.get("outcome"), 300)
+        if event and event["status"] == "scheduled" and event["due"] <= minute and outcome:
+            event.update(status="resolved", outcome=outcome)
+    return sorted(events.values(), key=lambda event: event["due"])
+
+
+def wait_plan(state, action):
+    action = action.strip()
+    match = WAIT_COMMAND.fullmatch(action)
+    plain = PLAIN_WAIT.fullmatch(action)
+    if not match and not plain:
+        if action.casefold().startswith("/wait"):
+            raise ValueError("Используйте /wait next, /wait dawn, /wait noon, /wait evening или от 1 до 1440 минут.")
+        return None
+    token = match[1].lower() if match else WAIT_WORDS[plain[1].lower()]
+    start = campaign_minute(state)
+    if start is None:
+        raise ValueError("В этой партии время ещё не установлено. Продолжите сцену обычным действием.")
+    events = [event for event in (state.get("agenda") or [])
+              if isinstance(event, dict) and event.get("status") == "scheduled"
+              and type(event.get("due")) is int]
+    if token == "next":
+        if not events:
+            raise ValueError("Нет запланированных событий. Можно подождать до рассвета или указать минуты.")
+        target = max(start, min(event["due"] for event in events))
+    elif token.isdigit():
+        if int(token) > 1440:
+            raise ValueError("За один ход можно пропустить до 1440 минут.")
+        target = start + int(token)
+    else:
+        minute_of_day = dict(dawn=360, noon=720, evening=1140)[token]
+        target = start // 1440 * 1440 + minute_of_day
+        if target <= start:
+            target += 1440
+    return {"from": start, "until": target, "label": clock_label(target),
+            "due": [event for event in events if event["due"] <= target]}

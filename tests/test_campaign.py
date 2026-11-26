@@ -3,7 +3,7 @@ import unittest
 
 from campaign import (
     active_check, apply_ability_event, initial_identity, merge_facts, merge_scene, normalize_ability,
-    pending_check, roll_result, rules_result,
+    pending_check, roll_result, rules_result, update_agenda, wait_plan,
 )
 
 
@@ -79,6 +79,22 @@ class CampaignTest(unittest.TestCase):
         })
         self.assertEqual(initial_identity("Выберите расу.", selected), {})
         self.assertEqual(initial_identity(reply.removesuffix("[[/ЛИСТ]]"), selected), {})
+
+    def test_wait_targets_and_event_once(self):
+        state = {"world_minute": 1320}
+        schedule = [{"id": "tavin", "title": "Ответ Тавина", "in_minutes": 60, "evidence": "Через час"}]
+        grounded = lambda text: text in ("Через час", "Тавин отказался")
+        state["agenda"] = update_agenda(state, schedule, [], 1320, grounded)
+        self.assertEqual(wait_plan(state, "/wait next")["until"], 1380)
+        self.assertEqual(wait_plan(state, "Жду до рассвета.")["label"], "День 2, 06:00")
+        outcome = [{"id": "tavin", "outcome": "Тавин отказался", "evidence": "Тавин отказался"}]
+        early = update_agenda(state, [], outcome, 1350, grounded)
+        self.assertEqual(early[0]["status"], "scheduled")
+        state["agenda"] = update_agenda(state, schedule, outcome, 1380, grounded)
+        self.assertEqual(state["agenda"][0]["status"], "resolved")
+        self.assertEqual(len(state["agenda"]), 1)
+        with self.assertRaises(ValueError):
+            wait_plan(state, "/wait next")
 
     def test_scene_identity_and_transfer_of_a_clue(self):
         scene = merge_scene({}, {"location": "Мельница", "participants": ["Рагар", "Гонец"]})

@@ -28,14 +28,14 @@ from openai import OpenAI
 from campaign import (
     active_check, apply_ability_event, facts_context, formula_key, merge_facts, merge_scene, notes_context,
     initial_identity, normalize_abilities, normalize_ability, pending_check, roll_result, rules_result,
-    sheet_identity,
+    sheet_identity, campaign_minute, clock_label, update_agenda, wait_plan,
 )
 
 from party_store import PartyConflict, PartyMissing, PartyStore
 from token_usage import TokenUsage, state_turn_id
 
 BASE_DIR = Path(__file__).resolve().parent
-APP_REVISION = "2026-11-26.4"
+APP_REVISION = "2026-11-26.5"
 QWEN_SUMMARY_LIMIT = 480
 QWEN_STATE_LIMIT = 1100
 QWEN_STATE_SETUP_LIMIT = 2200
@@ -564,6 +564,9 @@ LENGTH_NOTE = """
 
 
 STATE_EXTRACT_PROMPT = """
+Игровые часы. При создании верни world_minute — минута первого дня от 0 до 1439, соответствующая начальной сцене. Для прошедшего времени в обычном ходе верни elapsed: {minutes,evidence}, minutes целое 1..43200, evidence — цитата о фактически прошедшем времени. Минута мира никогда не убывает. Команду /wait сервер применяет сам. Для обещанного ответа или встречи с конкретным сроком верни schedule: [{id,title,location,in_minutes,evidence}]. Сохраняй один ID на событие; указывай срок в минутах от конца текущего хода. Когда наступившее событие действительно разрешилось в реплике, верни resolve_events: [{id,outcome,evidence}]. Отказ, подтверждение и альтернативный путь — возможные исходы. Повторное ожидание до уже прошедшего срока не создаёт ещё одно такое событие.
+Награда квеста. stages — условия завершения; reward_condition — отдельное условие выплаты из исходного предложения, если оно есть. Сохраняй его и суммы rewards при принятии и позже. При завершении условного задания или новой подтверждённой информации о награде верни reward_outcomes: [{id,outcome,evidence}], outcome — met, unmet или pending. evidence — дословная фраза о том, что условие выполнено или не выполнено. Не меняй золото, серебро, медь и XP при расчёте условной награды: сервер начисляет согласованные суммы. Если точного подтверждения нет, используй pending. Условие выплаты может остаться невыполненным, даже когда квест завершён.
+
 Сохраняй канон кампании. Для новой сцены или изменений верни scene: {location,time,participants,goal,situation}. Указывай устойчивое название локации. participants — только те, кто сейчас рядом. При смене локации обнови участников, цель и обстановку сцены. Возвращай только изменения. Для подтверждённых событий, показаний, версий и владения уликами верни обновления facts: [{id,subject,detail,source,holder,status}]. Устойчивый id привязан к одному факту или предмету, сохрани его при уточнении и передаче. status: confirmed, reported, suspected или resolved. Для передачи физической улики обнови holder и inventory_remove в том же ходе. Для новой объявленной команды /roll верни pending_check: {kind,title,target,effect,ability}; kind — check, attack, save, damage, heal или initiative. effect только hero_damage для урона персонажу игрока или hero_heal для его лечения. Для урона NPC effect опусти. Формулу и DC сервер получает из реплики. Если игрок явно отменил прежнее действие и мастер подтвердил отмену, верни cancel_check: true.
 Для завершённого отдыха верни rest_event: {kind,evidence}, где kind — short_rest или long_rest, evidence — фраза из новой реплики о завершении отдыха. Для состоявшегося использования умения без отдельного броска верни ability_event: {name,evidence}, где name совпадает с карточкой и evidence описывает применение в этом ходе. Дыхание дракона и Второе дыхание с проверкой расходует сервер. При изменении описания существующего умения сохраняй текущие заряды.
 При покупке верни purchase: {item,quantity,currency,price,evidence}, где item — точное название, quantity — число полученных предметов, currency — gold, silver или copper, price — общая цена, evidence — цитата новой подтверждённой покупки. Для покупки используй только purchase, не возвращай отдельные изменения кошелька или инвентаря.
@@ -848,12 +851,30 @@ def _merge_quests(old, changes):
                       or _quest_name(quest) == name), None)
         if index is None:
             item = {**change, "id": change.get("id") or uuid4().hex}
+            item.pop("reward_status", None)
+            if isinstance(item.get("reward_condition"), str) and item["reward_condition"].strip():
+                item["reward_condition"] = item["reward_condition"].strip()[:360]
+                item["reward_status"] = "pending"
+            else:
+                item.pop("reward_condition", None)
             if item.get("status") == "completed" and _quest_steps_open(item):
                 item["status"] = "active"
             merged.insert(0, item)
             continue
         previous = merged.pop(index)
         updated = {**previous, **change, "id": previous.get("id") or change.get("id")}
+        if previous.get("reward_condition"):
+            updated["reward_condition"] = previous["reward_condition"]
+            updated["reward_status"] = previous.get("reward_status", "pending")
+        elif previous.get("status") == "offered" and isinstance(change.get("reward_condition"), str):
+            condition = change["reward_condition"].strip()[:360]
+            if condition:
+                updated.update(reward_condition=condition, reward_status="pending")
+            else:
+                updated.pop("reward_condition", None)
+        else:
+            updated.pop("reward_condition", None)
+            updated.pop("reward_status", None)
         if previous.get("status") in {"completed", "failed"}:
             updated["status"] = previous["status"]
         if previous.get("rewards"):
@@ -912,6 +933,11 @@ def _quest_context(quests, awarded):
                                 if key in {"xp", "gold", "silver", "copper"} and type(value) is int}
         elif isinstance(rewards, list):
             entry["rewards"] = [item[:45] for item in rewards[:3] if isinstance(item, str)]
+        if quest.get("reward_condition"):
+            entry["reward_condition"] = quest["reward_condition"][:240]
+            entry["reward_status"] = quest.get("reward_status", "pending")
+        if quest.get("id"):
+            entry["id"] = quest["id"]
         if _quest_name(quest) in awarded:
             entry["xp_paid"] = True
         if status in {"offered", "active"} and isinstance(stages, list):
@@ -921,7 +947,7 @@ def _quest_context(quests, awarded):
         result.append(entry)
     result.sort(key=lambda q: q["status"] in {"completed", "failed"})
     excerpt = []
-    budget = 760
+    budget = 1550
     for quest in result[:6]:
         size = len(json.dumps(quest, ensure_ascii=False))
         if size <= budget:
@@ -1229,6 +1255,38 @@ def _purchase(current, change, latest):
     return True
 
 
+def _apply_conditional_rewards(merged, current, newly_completed, outcomes, latest):
+    changes = {}
+    controlled = any(quest.get("reward_condition") for quest in newly_completed.values())
+    quests = {quest.get("id"): quest for quest in merged["quests"]
+              if isinstance(quest.get("id"), str) and quest.get("reward_condition")}
+    for event in outcomes if isinstance(outcomes, list) else []:
+        if not isinstance(event, dict) or not isinstance(event.get("id"), str):
+            continue
+        quest = quests.get(event["id"])
+        if not quest or quest.get("status") != "completed" or _quest_steps_open(quest):
+            continue
+        controlled = True
+        if quest.get("reward_status") in ("paid", "denied"):
+            continue
+        outcome = event.get("outcome")
+        if outcome not in ("met", "unmet") or not _grounded_event(event.get("evidence"), latest):
+            continue
+        quest["reward_status"] = "paid" if outcome == "met" else "denied"
+        quest["reward_evidence"] = event["evidence"]
+        rewards = quest.get("rewards")
+        if outcome == "met" and isinstance(rewards, dict):
+            for key in ("xp", "gold", "silver", "copper"):
+                amount = rewards.get(key)
+                if type(amount) is int and amount > 0:
+                    changes[key] = changes.get(key, 0) + amount
+    if controlled:
+        for currency in ("gold", "silver", "copper"):
+            if type(current.get(currency, 0)) is not int:
+                current[currency] = 0
+    return changes, controlled
+
+
 def extract_state(messages, current_state, turn_id=None, result=None):
     current = dict(DEFAULT_STATE)
     if isinstance(current_state, dict):
@@ -1280,6 +1338,11 @@ def extract_state(messages, current_state, turn_id=None, result=None):
                    if key not in {"xp_event_ids", "quest_xp_awards", "quest_xp_paid_ids",
                                   "last_state_event_id", "level_history"}}
     model_state["facts"] = facts_context(current.get("facts"), action + " " + latest)
+    model_state["agenda"] = [event for event in (current.get("agenda") or [])
+                             if isinstance(event, dict) and event.get("status") == "scheduled"][:12]
+    plan = wait_plan(current, action)
+    if plan:
+        model_state["wait_plan"] = plan
     if result:
         model_state["roll_result"] = result
         model_state["rule_effect"] = rules_result(current, result)
@@ -1287,7 +1350,7 @@ def extract_state(messages, current_state, turn_id=None, result=None):
         model_state["next_upgrade_level"] = next_upgrade_level
     if isinstance(current.get("quests"), list):
         model_state["quests"] = [
-            {key: quest[key] for key in ("id", "name", "status") if key in quest}
+            {key: quest[key] for key in ("id", "name", "status", "reward_condition", "reward_status", "rewards") if key in quest}
             if isinstance(quest, dict) and quest.get("status") in {"completed", "failed"} else quest
             for quest in current["quests"]
         ]
@@ -1345,7 +1408,32 @@ def extract_state(messages, current_state, turn_id=None, result=None):
         if not identity:
             raise StateUnavailable("В ответе мастера не удалось прочитать имя, расу, класс и предысторию.")
         new_state.update(identity)
+    previous_minute = campaign_minute(current)
+    proposed_minute = new_state.pop("world_minute", None)
+    elapsed = new_state.pop("elapsed", None)
+    scheduled = new_state.pop("schedule", None)
+    resolved_events = new_state.pop("resolve_events", None)
+    reward_outcomes = new_state.pop("reward_outcomes", None)
     campaign_scene = merge_scene(current.get("scene"), new_state.pop("scene", None))
+    minute = previous_minute
+    if minute is None:
+        minute = (proposed_minute if type(proposed_minute) is int and 0 <= proposed_minute < 1440
+                  else campaign_minute({"scene": campaign_scene}))
+        if minute is None and new_character:
+            minute = 480
+    elif plan:
+        minute = plan["until"]
+    elif isinstance(elapsed, dict) and _grounded_event(elapsed.get("evidence"), latest):
+        duration = elapsed.get("minutes")
+        if type(duration) is int and 1 <= duration <= 43200:
+            minute += duration
+    if minute is not None:
+        new_state["world_minute"] = minute
+        campaign_scene["time"] = clock_label(minute)
+        new_state["agenda"] = update_agenda(current, scheduled, resolved_events, minute,
+                                            lambda evidence: _grounded_event(evidence, latest))
+    else:
+        new_state.pop("agenda", None)
     campaign_facts = merge_facts(current.get("facts"), new_state.pop("facts", None))
     proposed = new_state.pop("pending_check", None)
     cancel_check = new_state.pop("cancel_check", None) is True
@@ -1501,8 +1589,17 @@ def extract_state(messages, current_state, turn_id=None, result=None):
         name: quest for name, quest in quests_by_name.items()
         if name and name not in old_completed and quest.get("status") == "completed" and not _quest_steps_open(quest)
     }
+    conditional_awards, controls_wallet = _apply_conditional_rewards(
+        merged, current, newly_completed, reward_outcomes, latest,
+    )
+    if controls_wallet:
+        for currency in ("gold", "silver", "copper"):
+            merged[currency] = current.get(currency, 0) + conditional_awards.get(currency, 0)
+    xp += conditional_awards.get("xp", 0)
     for event_id, awards in fresh_events:
         for amount, name in awards:
+            if not name and event_id == last_event_id and controls_wallet:
+                continue
             if not name and event_id == last_event_id and len(newly_completed) == 1:
                 candidate, quest = next(iter(newly_completed.items()))
                 reward = quest.get("rewards")
@@ -1510,7 +1607,7 @@ def extract_state(messages, current_state, turn_id=None, result=None):
                     name = candidate
             if name:
                 quest = quests_by_name.get(name)
-                if (name in paid or not quest or str(quest.get("id", "")) in paid_ids
+                if (name in paid or not quest or quest.get("reward_condition") or str(quest.get("id", "")) in paid_ids
                         or quest.get("status") != "completed"
                         or _quest_steps_open(quest)):
                     continue
@@ -1526,7 +1623,7 @@ def extract_state(messages, current_state, turn_id=None, result=None):
     for name, quest in newly_completed.items():
         reward = quest.get("rewards")
         promised = reward.get("xp") if isinstance(reward, dict) else None
-        if (name not in paid and str(quest.get("id", "")) not in paid_ids
+        if (not quest.get("reward_condition") and name not in paid and str(quest.get("id", "")) not in paid_ids
                 and type(promised) is int and promised > 0):
             xp += promised
             paid.add(name)
@@ -1899,6 +1996,21 @@ def api_chat():
         action.pop("roll_receipt", None)
     state_context = {key: game_state[key] for key in STATE_FIELDS if key in game_state}
     query = str(action.get("content", ""))
+    try:
+        plan = wait_plan(game_state, query)
+        if plan and check:
+            raise ValueError("Сначала разрешите или отмените ожидающий бросок.")
+    except ValueError as exc:
+        return jsonify({"error": str(exc), "code": "action_invalid"}), 400
+    minute = campaign_minute(game_state)
+    if minute is not None:
+        state_context["world_clock"] = {"minute": minute, "label": clock_label(minute)}
+    agenda = [event for event in (game_state.get("agenda") or [])
+              if isinstance(event, dict) and event.get("status") == "scheduled"]
+    if agenda:
+        state_context["agenda"] = agenda[:12]
+    if plan:
+        state_context["wait_plan"] = plan
     scene = game_state.get("scene")
     state_context["scene"] = scene if isinstance(scene, dict) else {}
     lookup = " ".join((query, check.get("title", "") if check else "",
@@ -1964,7 +2076,13 @@ def api_chat():
                  "Если указан rule_effect, используй рассчитанный HP и не применяй изменение повторно. "
                  "Свободный бросок без check не разрешает действие. При pending_check сохраняй "
                  "ожидание, пока игрок не бросит или явно не отменит действие. "
-                 "scene — актуальная локация и участники, facts и journal — канон с источниками.")
+                 "scene — актуальная локация и участники, facts и journal — канон с источниками. "
+                 "world_clock — текущее время, оно не идёт назад. wait_plan фиксирует конец ожидания. "
+                 "В том же ответе дай конкретный исход по каждому наступившему событию из wait_plan.due; "
+                 "ответ, отказ или новый проверяемый путь. Если событий нет, опиши итог к указанному часу. "
+                 "Для обычного ожидания называй сколько прошло времени. Обещанному событию назначай достижимый срок. "
+                 "Если reward_condition задано, разделяй завершение и право на оплату: сообщи, исполнено ли условие, "
+                 "а подтверждение фактической выплаты оставь серверу. Не добавляй XP или монеты по такому квесту.")
     length_note = "" if setup_turn else "\n\n" + turn_rule + "\n\n" + LENGTH_NOTE
     state_note = STATE_NOTE_SETUP if setup_turn else STATE_NOTE
     messages = messages[:1] + [{
@@ -2186,6 +2304,14 @@ def _commit_party_turn(data):
             details.append(f"{label} {previous} → {current}{unit}")
     if isinstance(state.get("hp"), int) and state["hp"] != updated["hp"]:
         details.append(f"Здоровье {state['hp']} → {updated['hp']}/{updated['max_hp']} HP")
+    old_minute, new_minute = campaign_minute(state), campaign_minute(updated)
+    if old_minute is not None and new_minute is not None and old_minute < new_minute:
+        details.append(clock_label(new_minute))
+    for event in updated.get("agenda") or []:
+        if (isinstance(event, dict) and event.get("status") == "scheduled" and new_minute is not None
+                and type(event.get("due")) is int and event["due"] <= new_minute
+                and (old_minute is None or event["due"] > old_minute)):
+            details.append(f"Срок наступил: {event['title']}. Исход ещё не записан")
     if details and state.get("race") and state.get("class") and not state.get("character_setup_pending"):
         reply["resolution"] = " · ".join(details)
     saved = PARTIES.commit(owner, party_id, revision, request_id, updated, reply)

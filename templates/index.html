@@ -425,6 +425,7 @@
     <button class="btn" data-action="dice">🎲 Бросок 1d20</button>
     <button class="btn" data-action="dice-custom">🎲 Свой бросок...</button>
     <button class="btn" data-action="sheet">📜 Полный лист</button>
+    <button class="btn" data-action="wait">⌛ Время и события</button>
     <button class="btn" data-action="skills">🎯 Умения и навыки</button>
     <button class="btn" data-action="notes">📝 Заметки <span class="drawer-badge" id="drawer-notes-badge" style="display:none">0</span></button>
   </div>
@@ -1042,6 +1043,7 @@ function renderStatus() {
     </div>
     <div class="status-chips">
       ${state.scene?.location ? '<span class="status-chip">📍 ' + esc(state.scene.location) + '</span>' : ''}
+      ${Number.isInteger(state.world_minute) ? '<span class="status-chip">⌛ ' + esc(worldTime(state.world_minute)) + '</span>' : ''}
       <span class="status-chip">Ур. ${state.level}</span>
       ${state.level_pending ? `<span class="status-chip" title="Обсуди повышение с мастером">⬆ Повышение!</span>` : ''}
       <span class="status-chip">💰 ${formatCoins(state, true)}</span>
@@ -1414,7 +1416,12 @@ async function callAI(pending) {
     }
   } catch (error) {
     md.remove();
-    if (error.code === 'party_conflict' && partyRef) {
+    if (error.code === 'action_invalid') {
+      draftTurn = null;
+      persist();
+      redrawParty();
+      addMsg('system', error.message);
+    } else if (error.code === 'party_conflict' && partyRef) {
       try {
         const localAction = draftTurn?.action;
         useParty(await partyRequest('/api/parties/' + partyRef.id));
@@ -1469,6 +1476,7 @@ async function sendMessage(text) {
 function handleCommand(cmd, arg) {
   switch(cmd) {
     case '/roll': return doRoll(arg || undefined);
+    case '/wait': return arg ? waitForScene(arg) : showAgenda();
     case '/sheet': return doSheet();
     case '/skills': return doSkills();
     case '/notes': return doNotes();
@@ -1480,6 +1488,48 @@ function handleCommand(cmd, arg) {
     default: addMsg('system', `Неизвестная команда: ${cmd}. Введите /help.`);
   }
 }
+function worldTime(minute) {
+  const hh = String(Math.floor(minute % 1440 / 60)).padStart(2, '0');
+  const mm = String(minute % 60).padStart(2, '0');
+  return 'День ' + (Math.floor(minute / 1440) + 1) + ', ' + hh + ':' + mm;
+}
+
+function waitForScene(target) {
+  if (busy || draftTurn || !gameAccess) return;
+  const action = '/wait ' + target.trim();
+  addMsg('user', action);
+  return callAI({role: 'user', content: action});
+}
+
+function showAgenda() {
+  const time = state?.world_minute;
+  const scheduled = (state?.agenda || []).filter(event => event.status === 'scheduled');
+  const recent = (state?.agenda || []).filter(event => event.status === 'resolved')
+    .sort((a, b) => b.due - a.due).slice(0, 4);
+  const rows = scheduled.map(event => '<div class="kv"><span class="k">' + esc(event.title)
+    + '</span><span class="v">' + (event.due <= time ? 'Срок наступил · ' : '') + esc(worldTime(event.due))
+    + '</span></div>').join('');
+  const outcomes = recent.map(event => '<p><strong>' + esc(event.title) + '</strong> · ' + esc(event.outcome) + '</p>').join('');
+  const canWait = Number.isInteger(time) && !state.pending_check && !busy && !draftTurn;
+  modalContent.innerHTML = '<h3>⌛ Время и события</h3><p>'
+    + (Number.isInteger(time) ? esc(worldTime(time)) : 'Время установится в следующей сцене.')
+    + '</p><h4>Ожидаемые события</h4>' + (rows || '<p>Запланированных событий пока нет.</p>')
+    + (outcomes ? '<h4>Недавние исходы</h4>' + outcomes : '')
+    + (state?.pending_check ? '<p>Сначала разрешите ожидающий бросок.</p>' : '')
+    + (canWait ? '<button type="button" class="btn" data-wait="dawn">До рассвета</button>'
+      + '<button type="button" class="btn" data-wait="60">На 1 час</button>'
+      + (scheduled.length ? '<button type="button" class="btn primary" data-wait="next">До ближайшего события</button>' : '') : '')
+    + '<button type="button" class="btn" data-close-agenda>Закрыть</button>';
+  modalContent.querySelectorAll('[data-wait]').forEach(button => {
+    button.onclick = () => {
+      modalEl.classList.remove('open');
+      waitForScene(button.dataset.wait);
+    };
+  });
+  modalContent.querySelector('[data-close-agenda]').onclick = () => modalEl.classList.remove('open');
+  modalEl.classList.add('open');
+}
+
 function showRoll(message) {
   const dice = message.roll;
   if (dice && Array.isArray(dice.rolls)) {
@@ -1578,6 +1628,13 @@ async function doSheet() {
       <div style="font-size:11px;color:${statusColor};margin-bottom:4px">${offered ? 'Предложен · ' : ''}${t.label}${q.giver ? ' · от ' + esc(q.giver) : ''}${q.location ? ' · ' + esc(q.location) : ''}</div>
       <div>${stages || '<div style="font-size:12px;color:var(--text-secondary);font-style:italic">— нет этапов —</div>'}</div>
       ${rewards}
+      ${q.reward_condition ? `<div style="font-size:12px;margin-top:6px">
+        Выплата при условии: ${esc(q.reward_condition)}. ${{
+          paid: 'Награда выплачена.',
+          denied: 'Условие не выполнено. Выплаты нет.',
+          pending: 'Условие ещё не подтверждено.',
+        }[q.reward_status] || 'Условие ещё не подтверждено.'}
+      </div>` : ''}
     </div>`;
   }
 
@@ -2161,6 +2218,7 @@ function doHelp() {
   addHtmlMsg('system', 'Команды:<br><code>/roll 1d20+3</code> — бросок<br>' +
     '<code>/sheet</code> — полный лист<br><code>/skills</code> — умения и навыки<br>' +
     '<code>/notes</code> — заметки, письма, документы<br>' +
+    '<code>/wait</code> — время и события. <code>/wait next</code> — до ближайшего события<br>' +
     '<code>/save имя</code> — сохранить<br><code>/load имя</code> — загрузить<br>' +
     '<code>/transfer</code> — перенос партии<br><code>/reset</code> — новая игра<br><br>' +
     'Заметки, письма, документы, слухи — в отдельной вкладке 📝, не в инвентаре.<br>' +
@@ -2313,6 +2371,7 @@ document.querySelectorAll('#drawer .btn[data-action]').forEach(btn => {
     if (a === 'dice') doRoll();
     else if (a === 'dice-custom') rollModal().then(v => { if (v) doRoll(v); });
     else if (a === 'sheet') doSheet();
+    else if (a === 'wait') showAgenda();
     else if (a === 'skills') doSkills();
     else if (a === 'notes') doNotes();
     else if (a === 'save') doSave();
