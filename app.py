@@ -25,13 +25,14 @@ from openai import OpenAI
 
 from campaign import (
     active_check, apply_ability_event, facts_context, formula_key, merge_facts, merge_scene, notes_context,
-    normalize_abilities, normalize_ability, pending_check, roll_result, rules_result,
+    initial_identity, normalize_abilities, normalize_ability, pending_check, roll_result, rules_result,
+    sheet_identity,
 )
 
 from token_usage import TokenUsage, state_turn_id
 
 BASE_DIR = Path(__file__).resolve().parent
-APP_REVISION = "2026-11-26.2"
+APP_REVISION = "2026-11-26.3"
 QWEN_SUMMARY_LIMIT = 480
 QWEN_STATE_LIMIT = 1100
 QWEN_STATE_SETUP_LIMIT = 2200
@@ -302,11 +303,6 @@ def _start_completion(messages, *, max_tokens=None, reasoning_effort=None, diag=
     return _create_with_fallback(_narration_options(messages, limit, False, effort), diag)
 
 
-def _sheet_closed(text):
-    """Лист открылся, но не закрылся — ответ оборвался на середине."""
-    return text.count("[[ЛИСТ]]") == text.count("[[/ЛИСТ]]")
-
-
 def _measured_completion(turn_id, stage, **options):
     response = None
     try:
@@ -439,7 +435,7 @@ XP И ЛИСТ
 CHARACTER_CREATION_RULES = """
 ════════ СОЗДАНИЕ ПЕРСОНАЖА ════════
 При первом описании персонажа определи:
-1. РАСУ и КЛАСС (если не указаны — предложи 2–3 варианта).
+1. РАСУ и КЛАСС. Возьми их из свободного описания или указанных полей. Пропущенные выбери сам по смыслу описания и миру.
 2. ПРЕДЫСТОРИЮ (Солдат, Преступник, Мудрец, Народный герой, Благородный, Отшельник, Артист, Бродяга, Моряк, Наёмник, Шарлатан, Прислужник).
 3. ХАРАКТЕРИСТИКИ (базовые по классу + расовые бонусы).
 4. ВЛАДЕНИЯ, НАВЫКИ, УМЕНИЯ.
@@ -449,7 +445,7 @@ CHARACTER_CREATION_RULES = """
 Характеристики считай сам: база по классу плюс расовые бонусы плюс всё, что назвал игрок. Числа из служебного листа не копируй — там заготовка. HP, кошелёк и снаряжение выдай по классу: Колдун получает 2 ячейки заклинаний, лёгкие доспехи, кинжалы и простые инструменты, стартовый кошелёк 10–15 зм.
 
 ════════ СТРУКТУРА ПЕРВОГО ОТВЕТА ════════
-Если раса и класс ещё не названы — сначала предложи 2–3 варианта одним коротким абзацем и дождись выбора. Лист давай только когда раса, класс и предыстория определены.
+Оформляй лист и начинай игру в этом ответе. Игрок может указать имя, расу, класс, предысторию и завязку свободным текстом, выбрать отдельные поля или полностью поручить выбор мастеру. Придумай имя, расу, класс или предысторию, если их не указали и они не ясны из текста. Не требуй выбора из вариантов и не задавай уточняющий вопрос перед листом. Если игрок указал стартовую сцену или мир, сохрани их.
 
 Лист героя оформляй одним блоком между метками [[ЛИСТ]] и [[/ЛИСТ]]. Внутри — эти строки, каждая с новой строки, ровно с такими значками и без пропусков:
 
@@ -673,7 +669,7 @@ def _recent_dialogue(dialogue):
     return list(reversed(tail))
 
 
-def _messages_with_memory(messages, session_id):
+def _messages_with_memory(messages, session_id, *, character_setup=False):
     summary = _summary_get(session_id)
     dialogue = _dialogue_messages(messages)
     parts = [message["content"] for message in messages
@@ -686,6 +682,8 @@ def _messages_with_memory(messages, session_id):
                  if message.get("role") == "system"
                  and message["content"].startswith((STATE_NOTE, STATE_NOTE_SETUP)))
     system = [{"role": "system", "content": "\n\n".join(parts)}] if parts else []
+    if character_setup:
+        return system + dialogue[-1:]
     # Даже для старого сохранения без резюме ближайшая проверка остаётся целиком.
     tail = _recent_dialogue(dialogue[max(0, min(summary["folded"], len(dialogue) - 3)):])
     return system + tail
@@ -1261,6 +1259,11 @@ def extract_state(messages, current_state, turn_id=None, result=None):
         app.logger.warning("Извлечение состояния не удалось: %s", _short_error(exc))
         raise StateUnavailable("Лист не обновился. Можно повторить сохранение этого хода.") from exc
 
+    if new_character:
+        identity = initial_identity(latest, current)
+        if not identity:
+            raise StateUnavailable("В ответе мастера не удалось прочитать имя, расу, класс и предысторию.")
+        new_state.update(identity)
     campaign_scene = merge_scene(current.get("scene"), new_state.pop("scene", None))
     campaign_facts = merge_facts(current.get("facts"), new_state.pop("facts", None))
     proposed = new_state.pop("pending_check", None)
@@ -1486,6 +1489,8 @@ def extract_state(messages, current_state, turn_id=None, result=None):
               "dc_modifier_reasons", "proficiencies", "skills", "abilities", "level_history", "xp_event_ids"):
         if not isinstance(merged.get(f), list): merged[f] = current.get(f, [])
     merged["notes"] = [n for n in (normalize_note(x) for x in merged["notes"]) if n]
+    if new_character:
+        merged.pop("character_setup_pending", None)
     return merged
 
 
@@ -1728,6 +1733,8 @@ def api_chat():
         # Пустые числа заготовки только сбивали модель: на первом ходу она их копировала.
         for field in ("hp", "max_hp", "gold", "silver", "copper", "level", "xp", "xp_next", "stats"):
             state_context.pop(field, None)
+        if state_context.get("name") == DEFAULT_STATE["name"]:
+            state_context.pop("name")
     # При создании героя структуру ответа задаёт CHARACTER_CREATION_RULES,
     # поэтому блок двух абзацев не подмешиваем.
     turn_rule = ("Используй roll_result как окончательный результат именно указанной проверки. "
@@ -1742,7 +1749,9 @@ def api_chat():
         "content": (state_note + json.dumps(state_context, ensure_ascii=False) + length_note),
     }] + messages[1:]
     turn_id = uuid4().hex
-    messages = _messages_with_memory(messages, _header_token("X-Session-Id", 64))
+    messages = _messages_with_memory(
+        messages, _header_token("X-Session-Id", 64), character_setup=setup_turn,
+    )
 
     visitor_id = request.cookies.get(PRESENCE_COOKIE, "")
     narration_limit = NARRATION_SETUP_TOKENS if setup_turn else NARRATION_MAX_TOKENS
@@ -1790,7 +1799,7 @@ def api_chat():
                                        getattr(response, "model", None) or MODEL, usage)
                     if diag.get("reasoning_rejected"):
                         _REASONING_STATE["fix"] = ""
-                    if text and _sheet_closed(text) and finish != "length":
+                    if text and finish != "length" and sheet_identity(text):
                         if attempts > 1 and not diag.get("reasoning_rejected"):
                             _REASONING_STATE["fix"] = effort or ""
                         emitted = True
@@ -1798,15 +1807,12 @@ def api_chat():
                         yield TURN_COMPLETE
                         return
                     print(
-                        f"[chat] лист не закрыт: попытка={attempts} limit={limit} "
+                        f"[chat] неполный лист персонажа: попытка={attempts} limit={limit} "
                         f"effort={effort or '—'} finish={finish} chars={len(text)} "
                         f"reasoning_tokens={getattr(getattr(usage, 'completion_tokens_details', None), 'reasoning_tokens', None)}",
                         flush=True,
                     )
-                yield ("\n[Ошибка API: модель не вернула текст. Обычно это значит, что "
-                       "весь лимит вывода ушёл на скрытые рассуждения. Отправьте сообщение "
-                       "ещё раз; если повторяется — задайте в Railway CHAT_REASONING_EFFORT=none "
-                       "и перезапустите сервис.]")
+                yield "\n[Ошибка API: мастер не вернул полный лист персонажа. Повторите тот же ход.]"
                 return
             learned = _REASONING_STATE["fix"]
             variants = [

@@ -2,7 +2,7 @@ import json
 import unittest
 
 from campaign import (
-    active_check, apply_ability_event, merge_facts, merge_scene, normalize_ability,
+    active_check, apply_ability_event, initial_identity, merge_facts, merge_scene, normalize_ability,
     pending_check, roll_result, rules_result,
 )
 
@@ -61,6 +61,15 @@ class CampaignTest(unittest.TestCase):
         self.assertEqual(apply_ability_event([normalized], rest="short_rest")[0], [normalized])
         passive = {**legacy, "name": "Сопротивление", "recharge": "passive"}
         self.assertEqual(normalize_ability(passive), {"name": "Сопротивление", "recharge": "passive"})
+
+    def test_character_identity_keeps_chosen_fields_and_fills_skipped_fields(self):
+        reply = "[[ЛИСТ]]\n👤 Лис — Эльф · Следопыт · Скиталец\n[[/ЛИСТ]]"
+        selected = {"name": "Пустой", "race": "", "class": "Ловец ветра"}
+        self.assertEqual(initial_identity(reply, selected), {
+            "name": "Лис", "race": "Эльф", "class": "Ловец ветра", "background": "Скиталец",
+        })
+        self.assertEqual(initial_identity("Выберите расу.", selected), {})
+        self.assertEqual(initial_identity(reply.removesuffix("[[/ЛИСТ]]"), selected), {})
 
     def test_scene_identity_and_transfer_of_a_clue(self):
         scene = merge_scene({}, {"location": "Мельница", "participants": ["Рагар", "Гонец"]})

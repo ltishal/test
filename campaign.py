@@ -12,6 +12,42 @@ KINDS = {"check", "attack", "save", "damage", "heal", "initiative"}
 SCENE_FIELDS = ("id", "location", "time", "participants", "goal", "situation")
 FACT_FIELDS = ("id", "subject", "detail", "source", "holder", "status")
 FACT_STATUSES = {"confirmed", "reported", "suspected", "resolved"}
+IDENTITY_FIELDS = ("name", "race", "class", "background")
+
+
+def sheet_identity(reply):
+    """Read the same identity shown in the character sheet."""
+    if reply.count("[[ЛИСТ]]") != 1 or reply.count("[[/ЛИСТ]]") != 1:
+        return {}
+    _, _, suffix = reply.partition("[[ЛИСТ]]")
+    sheet, end, _ = suffix.partition("[[/ЛИСТ]]")
+    if not end:
+        return {}
+    for line in sheet.splitlines():
+        identity = line.strip().replace("**", "")
+        if not identity.startswith("👤"):
+            continue
+        identity = identity.removeprefix("👤").lstrip("️ ").strip()
+        parts = re.split(r"\s+[-—–]\s+", identity, maxsplit=1)
+        if len(parts) != 2:
+            return {}
+        values = [parts[0], *parts[1].split("·")]
+        if len(values) == len(IDENTITY_FIELDS) and all(value.strip() for value in values):
+            return dict(zip(IDENTITY_FIELDS, (value.strip() for value in values)))
+        return {}
+    return {}
+
+
+def initial_identity(reply, selected):
+    identity = sheet_identity(reply)
+    if not identity:
+        return {}
+    for key in IDENTITY_FIELDS:
+        value = selected.get(key)
+        if isinstance(value, str) and value.strip() and (key != "name" or value.strip() != "Пустой"):
+            identity[key] = value.strip()
+    return identity
+
 
 
 def _text(value, limit=180):

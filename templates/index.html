@@ -234,7 +234,6 @@
   .character-steps { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 6px; }
   .character-steps .btn { min-height: 44px; padding: 6px 2px; font-size: clamp(11px, 3vw, 14px); }
   .character-steps .btn[aria-current="step"] { border-color: var(--accent-gold); color: var(--accent-gold); }
-  .character-steps .btn:disabled { opacity: 0.55; cursor: default; }
   #character-step { min-width: 0; }
   #character-step h3 { margin: 0 0 10px; font: 700 18px var(--font-serif); }
   .character-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; }
@@ -255,8 +254,6 @@
   }
   #character-builder textarea { resize: vertical; }
   .character-summary { margin: 0; color: var(--text-secondary); overflow-wrap: anywhere; }
-  #character-error { margin: 0; color: #ffad9f; font-size: 14px; }
-  #character-error:empty { display: none; }
   .character-footer { display: flex; justify-content: flex-end; gap: 8px; }
   .save-item { padding: 12px 14px; background: var(--bg-card); border: 1px solid var(--border-subtle); border-radius: 8px; cursor: pointer; font-size: 14px; }
   .save-item:active { background: #3a342f; }
@@ -463,7 +460,6 @@
     </div>
     <nav class="character-steps" id="character-steps" aria-label="Этапы создания"></nav>
     <section id="character-step" aria-labelledby="character-step-title"></section>
-    <p id="character-error" role="alert"></p>
     <div class="character-footer">
       <button type="button" class="btn" id="character-back">Назад</button>
       <button type="submit" class="btn primary" id="character-next">Далее</button>
@@ -635,40 +631,39 @@ function readCharacterOptions() {
 }
 
 function openCharacterBuilder(world = null) {
-  if (busy || characterDialog.open) return;
+  if (busy || draftTurn || characterDialog.open) return;
   const form = document.getElementById('character-form');
   const stepPanel = document.getElementById('character-step');
   const stepNav = document.getElementById('character-steps');
   const next = document.getElementById('character-next');
   const back = document.getElementById('character-back');
-  const error = document.getElementById('character-error');
   const choices = {};
   const stored = readCharacterOptions();
   const customOptions = Object.fromEntries(CHARACTER_CATEGORIES.map(({key}) =>
     [key, Array.isArray(stored[key]) ? stored[key].filter(v => typeof v === 'string' && v.trim()) : []]
   ));
   const stepLabels = [...CHARACTER_CATEGORIES.map(({label}) => label), 'Старт'];
-  let step = 0;
+  const startStep = CHARACTER_CATEGORIES.length;
+  const typed = {};
+  let step = startStep;
   let name = '';
   let scene = '';
 
   document.getElementById('character-world').textContent =
-    world ? world.name + ' · ' + world.desc : 'Соберите героя для новой игры.';
+    world ? world.name + ' · ' + world.desc : '';
 
   function selectOption(category, value) {
-    choices[category.key] = value;
-    error.textContent = '';
+    choices[category.key] = value.trim();
     stepPanel.querySelectorAll('[data-character-option]').forEach(button => {
-      button.setAttribute('aria-pressed', String(button.dataset.characterOption === value));
+      button.setAttribute('aria-pressed', String(button.dataset.characterOption === choices[category.key]));
     });
-    stepNav.children[step + 1].disabled = false;
+    next.textContent = choices[category.key] ? 'Далее' : 'Пропустить';
   }
 
   function addCustomOption(category, options) {
     const input = document.getElementById('character-custom-input');
     const value = input.value.trim();
     if (!value) {
-      error.textContent = 'Введите название своего варианта.';
       input.focus();
       return;
     }
@@ -677,36 +672,33 @@ function openCharacterBuilder(world = null) {
       customOptions[category.key].push(value);
       try { localStorage.setItem(CHARACTER_CUSTOM_KEY, JSON.stringify(customOptions)); } catch (e) {}
     }
+    delete typed[category.key];
     choices[category.key] = match ? match[1] : value;
     renderStep();
-    stepPanel.querySelector('[aria-pressed="true"]').focus();
+    stepPanel.querySelector('[aria-pressed="true"]')?.focus();
   }
 
   function renderStep() {
     const category = CHARACTER_CATEGORIES[step];
-    const firstIncomplete = CHARACTER_CATEGORIES.findIndex(({key}) => !choices[key]);
     stepNav.innerHTML = stepLabels.map((label, index) =>
       `<button type="button" class="btn" data-character-step="${index}"
-        ${index === step ? 'aria-current="step"' : ''}
-        ${firstIncomplete !== -1 && index > firstIncomplete ? 'disabled' : ''}>${label}</button>`
+        ${index === step ? 'aria-current="step"' : ''}>${label}</button>`
     ).join('');
-    next.textContent = category ? 'Далее' : 'Начать приключение';
-    back.hidden = step === 0;
-    error.textContent = '';
+    next.textContent = category ? (choices[category.key] ? 'Далее' : 'Пропустить') : 'Начать приключение';
+    back.hidden = step === 0 || step === startStep;
 
     if (!category) {
-      stepPanel.innerHTML = `<h3 id="character-step-title" tabindex="-1">Герой готов к приключению</h3>
-        <p class="character-summary">${[choices.race, choices.class, choices.background].map(esc).join(' · ')}</p>
+      const summary = [choices.race, choices.class, choices.background].filter(Boolean).map(esc).join(' · ');
+      stepPanel.innerHTML = `<h3 id="character-step-title" tabindex="-1">Опишите героя своими словами</h3>
+        <p class="character-summary">Класс, расу и предысторию можно указать здесь или выбрать на вкладках. Остальное подберёт мастер.</p>
+        ${summary ? '<p class="character-summary">' + summary + '</p>' : ''}
         <div class="character-fields">
-          <label for="character-name">Имя персонажа</label>
-          <input id="character-name" maxlength="60" required value="${esc(name)}">
-          <label for="character-scene">${world ? 'Детали о герое (необязательно)' : 'Мир или завязка (необязательно)'}</label>
-          <textarea id="character-scene" rows="3" maxlength="600">${esc(scene)}</textarea>
+          <label for="character-name">Имя персонажа (необязательно)</label>
+          <input id="character-name" maxlength="60" value="${esc(name)}">
+          <label for="character-scene">Герой и завязка (необязательно)</label>
+          <textarea id="character-scene" rows="4" maxlength="2000" placeholder="Например, я следопыт из горного клана и ищу пропавшего проводника.">${esc(scene)}</textarea>
         </div>`;
-      document.getElementById('character-name').oninput = event => {
-        name = event.target.value;
-        error.textContent = '';
-      };
+      document.getElementById('character-name').oninput = event => { name = event.target.value; };
       document.getElementById('character-scene').oninput = event => { scene = event.target.value; };
       return;
     }
@@ -722,52 +714,50 @@ function openCharacterBuilder(world = null) {
       <div class="character-custom">
         <label for="character-custom-input">Свой вариант</label>
         <div class="character-custom-row">
-          <input id="character-custom-input" maxlength="120" placeholder="Название">
-          <button type="button" class="btn" id="character-add">Добавить</button>
+          <input id="character-custom-input" maxlength="120" placeholder="Введите свой вариант"
+            value="${esc(typed[category.key] || '')}">
+          <button type="button" class="btn" id="character-add">Запомнить</button>
         </div>
       </div>`;
+    const input = document.getElementById('character-custom-input');
     stepPanel.querySelectorAll('[data-character-option]').forEach(button => {
-      button.onclick = () => selectOption(category, button.dataset.characterOption);
+      button.onclick = () => {
+        const label = button.dataset.characterOption;
+        const selected = choices[category.key] === label;
+        delete typed[category.key];
+        input.value = '';
+        selectOption(category, selected ? '' : label);
+      };
     });
     document.getElementById('character-add').onclick = () => addCustomOption(category, options);
-    document.getElementById('character-custom-input').onkeydown = event => {
-      if (event.key !== 'Enter' || event.isComposing) return;
-      event.preventDefault();
-      addCustomOption(category, options);
+    input.oninput = () => {
+      typed[category.key] = input.value;
+      selectOption(category, input.value);
     };
   }
 
   function goToStep(index) {
     step = index;
     renderStep();
-    const focusTarget = document.getElementById('character-name') || document.getElementById('character-step-title');
-    focusTarget.focus();
+    document.getElementById('character-step-title').focus();
     characterDialog.scrollTop = 0;
   }
 
   document.getElementById('character-close').onclick = () => characterDialog.close();
   stepNav.onclick = event => {
     const button = event.target.closest('[data-character-step]');
-    if (button && !button.disabled) goToStep(Number(button.dataset.characterStep));
+    if (button) goToStep(Number(button.dataset.characterStep));
   };
   back.onclick = () => goToStep(step - 1);
   form.onsubmit = event => {
     event.preventDefault();
     const category = CHARACTER_CATEGORIES[step];
     if (category) {
-      if (choices[category.key]) goToStep(step + 1);
-      else {
-        error.textContent = 'Выберите карточку или добавьте свой вариант.';
-        stepPanel.querySelector('.character-tile').focus();
-      }
+      goToStep(step + 1);
       return;
     }
-    if (!name.trim()) {
-      error.textContent = 'Введите имя персонажа.';
-      document.getElementById('character-name').focus();
-      return;
-    }
-    if (busy || (messages.length && !confirm('Начать новую игру? Текущая история будет заменена.'))) return;
+    if (busy || draftTurn || !gameAccess
+        || (messages.length && !confirm('Начать новую игру? Текущая история будет заменена.'))) return;
     characterDialog.close();
     startCharacterGame({name: name.trim(), ...choices}, world, scene.trim());
   };
@@ -779,17 +769,20 @@ function openCharacterBuilder(world = null) {
 function startCharacterGame(character, world, scene) {
   if (busy || draftTurn) return;
   messages = [];
-  state = {...EMPTY_STATE, ...character, character_setup_pending: true};
+  state = {...EMPTY_STATE, name: '', ...character, character_setup_pending: true};
   resetSession();
   ttsStop();
   tts.lastText = '';
   chatEl.innerHTML = '';
   renderStatus();
+  const details = [['Имя', character.name], ['Раса', character.race],
+    ['Класс', character.class], ['Предыстория', character.background]]
+    .filter(([, value]) => value).map(([label, value]) => label + ': ' + value).join('\n');
   const prompt = [
-    `Мой персонаж — ${character.name}. Раса: ${character.race}. Класс: ${character.class}. Предыстория: ${character.background}.`,
     world?.prompt,
+    details,
     scene,
-    'Сохрани мой выбор, включая авторские варианты. Подбери стартовые характеристики, навыки и умения, затем начни приключение.'
+    'Сохрани указанные детали, включая авторские варианты. Подбери недостающие данные героя и начни приключение.'
   ].filter(Boolean).join('\n\n');
   sendMessage(prompt);
 }
@@ -1287,10 +1280,7 @@ async function callAI(pending) {
     }
     const updated = await response.json();
     const oldLevel = Number(state?.level || 1);
-    if (state?.character_setup_pending) {
-      for (const key of ['name', 'race', 'class', 'background']) updated[key] = state[key];
-      delete updated.character_setup_pending;
-    }
+
     const hpBefore = Number(state?.hp);
     const gainedXP = Number(updated.xp || 0) - Number(state?.xp || 0);
     const resolution = [];
@@ -2065,7 +2055,7 @@ function renderAll() {
 function showIntro() {
   const intro = addHtmlMsg('system',
     '<button type="button" class="btn primary">Создать персонажа</button><br><br>' +
-    'Мир можно выбрать в меню. Чтобы начать без конструктора, опишите героя и завязку в чате.');
+    'Опишите героя в чате или откройте форму. Готовые миры доступны в меню.');
   intro.querySelector('button').onclick = () => openCharacterBuilder();
 }
 function renderWorlds() {
