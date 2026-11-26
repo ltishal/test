@@ -8,6 +8,8 @@ import os
 import re
 import json
 import random
+import secrets
+import sqlite3
 import hashlib
 import tempfile
 import threading
@@ -29,10 +31,11 @@ from campaign import (
     sheet_identity,
 )
 
+from party_store import PartyConflict, PartyMissing, PartyStore
 from token_usage import TokenUsage, state_turn_id
 
 BASE_DIR = Path(__file__).resolve().parent
-APP_REVISION = "2026-11-26.3"
+APP_REVISION = "2026-11-26.4"
 QWEN_SUMMARY_LIMIT = 480
 QWEN_STATE_LIMIT = 1100
 QWEN_STATE_SETUP_LIMIT = 2200
@@ -160,6 +163,8 @@ def _saves_dir():
 
 SAVES_DIR = _saves_dir()
 TOKEN_USAGE = TokenUsage(SAVES_DIR / "token_usage.sqlite3")
+PARTIES = PartyStore(SAVES_DIR / "parties.sqlite3")
+PARTIES.initialize()
 app.add_url_rule("/admin/tokens", view_func=TOKEN_USAGE.dashboard)
 
 # ─── Лимит параллельных обращений к модели ────────────────────────────────
@@ -328,12 +333,14 @@ def _header_token(name, limit):
 
 
 PRESENCE_COOKIE = "rpg_visitor"
+OWNER_COOKIE = "rpg_party_owner"
 PRESENCE_LIMIT = 10
 PRESENCE_TIMEOUT = 90
 CONVERSATION_WINDOW = 180
 _GAME_ENDPOINTS = {
     "api_chat", "api_state", "api_roll", "api_saves_list", "api_save",
     "api_save_rename", "api_save_delete", "api_load",
+    "api_parties", "api_party", "api_party_discard", "api_party_note",
 }
 
 
@@ -389,12 +396,30 @@ def _admit_visitor():
     return visitor_id, _check_presence(visitor_id, admit=True)
 
 
+def _owner_token():
+    token = request.cookies.get(OWNER_COOKIE, "")
+    return token if re.fullmatch(r"[A-Za-z0-9_-]{43}", token) else ""
+
+
+def _owner(token=None):
+    token = token or _owner_token()
+    return hashlib.sha256(token.encode()).hexdigest() if token else ""
+
+
+def _set_owner_cookie(response, token):
+    response.set_cookie(OWNER_COOKIE, token, max_age=365 * 24 * 60 * 60,
+                        httponly=True, samesite="Lax",
+                        secure=request.is_secure or request.headers.get("X-Forwarded-Proto") == "https")
+
+
 def _presence_response(body, visitor_id, status=200):
     response = app.make_response((body, status))
     response.headers["Cache-Control"] = "no-store"
     if request.cookies.get(PRESENCE_COOKIE) != visitor_id:
         response.set_cookie(PRESENCE_COOKIE, visitor_id, httponly=True, samesite="Lax",
                             secure=request.is_secure or request.headers.get("X-Forwarded-Proto") == "https")
+    if not _owner_token() and status == 200:
+        _set_owner_cookie(response, secrets.token_urlsafe(32))
     return response
 
 
@@ -546,6 +571,7 @@ STATE_EXTRACT_PROMPT = """
 Обнови лист RPG по последнему ходу. Верни строго JSON только изменённых полей, {} при отсутствии изменений.
 Меняй состояние только по новому результату в последней реплике мастера. Предыдущие реплики и пересказ старых событий служат контекстом. Лист уже учитывает прошлые удары, лечение, покупки и расходы. Изменяй кошелёк и инвентарь лишь при реальном новом обмене, расходе или находке. Пересказ, проверка числа, предложения и суммы до прошлого обмена ничего не меняют. Для существующего героя верни hp_delta (отрицательный урон или положительное лечение) только за новый результат, и hp_event: короткая дословная фраза из последнего ответа, где этот урон или лечение произошли, а не где обсуждается итоговое здоровье. На запросе броска, сверке или пересказе не возвращай hp_delta. При создании используй hp и max_hp. Для изменений инвентаря или монет у существующего героя верни resource_events: {"inventory":"дословная фраза нового получения, траты или передачи", "wallet":"дословная фраза новой оплаты"}. Укажи только затронутые группы. Цифры в пересказе или сверке не являются событиями. xp, xp_next, level, level_pending, xp_event_ids считает сервер.
 Имя, раса, класс и предыстория меняются только по событию. Поля: name, race, class, background, hp, max_hp, gold, silver, copper, stats {str,dex,con,int,wis,cha}. HP не выше max_hp. Базовые характеристики, владения, навыки и умения назначай при создании, беря их из блока [[ЛИСТ]]: строка «📊» — характеристики, «❤️» — hp, уровень, опыт и кошелёк, «🛡» — владения, «🗣» — языки, «🎯» — навыки с суммарным бонусом, «⚡» — активные умения с uses_max, uses_left и recharge (short_rest, long_rest или day), «🌀» — пассивные и постоянные эффекты с recharge passive и без uses_max, «🎒» — инвентарь. Значки и метки [[ЛИСТ]] в лист не переноси. Название умения бери из блока как есть, включая числовой эффект. Инвентарь, кошелёк и характеристики из блока переноси сразу, в том же ходе. Навык {name,bonus,source}; умение {name,description,uses_max,uses_left,recharge}. Трать применения по событию и восстанавливай по отдыху. Для Дыхания дракона спиши одно применение после разрешения урона, а не пока мастер ждёт бросок. Сохраняй полное описание эффекта при изменении только зарядов. Активное умение «без ограничений» передавай с recharge: "unlimited", без uses_max и uses_left. Пассивный эффект передавай с recharge: "passive". Не используй отрицательные заряды, Markdown и HTML-сущности в названии.
+Для передачи физической вещи из инвентаря персонажа используй item_transfers: [{id,quantity,holder,evidence}]. id — точный ID из инвентаря, holder — имя получателя, evidence — цитата о состоявшейся передаче в этой реплике. Не используй одновременно inventory_remove для той же передачи.
 Изменённую запись коллекции возвращай целиком с прежним id или именем. inventory содержит только добавленные или изменённые вещи. Для удаления верни inventory_remove: [{"name":"точное имя из листа","quantity":1}]. Удаляй за фактический расход, передачу или потерю. Для замены старого названия новым явно удали старую запись. Количество у изменённого предмета указывай итоговое. notes — содержание документов, писем, слухов и записей. Полученный физический документ также добавь в inventory, при вручении удали его из inventory. Заметка {id,type,title,content,source,date,unread}; type: note, letter, document, notification, rumor или journal.
 Квест {id,name,type,status,chain,chain_order,stages,current_stage,rewards,giver,location}; stages — объекты {text,done}; rewards — объект {xp,gold,silver,copper,items,reputation}. Записывай окончательно предложенные условия со статусом offered, принятые — active. Сохраняй id, название, этапы и награду. Отмечай каждый фактически выполненный этап по отдельности. Закрывай квест после сдачи всех обязательных этапов. Если квест официально закрыли с неполным результатом, верни failed и сохрани невыполненные пункты. Исправляй явно отменённое закрытие с прежним id.
 Временные поля по сцене: conditions, position, cover, weapon_in_hand, restrained, dc_modifier, dc_modifier_reasons. Отрази уже совершённое перемещение даже перед запросом броска. При смене сцены обнови cover: "нет", если герой покинул прежнее укрытие без нового. При пустых руках верни weapon_in_hand: "". Если условия прошли, верни пустой список; при отсутствии помех — 0 и []. Связи {name,attitude,note}; faction_clocks {name,progress,max,goal}. При обучении или событии в мире обновляй skills и abilities даже после создания героя.
@@ -669,8 +695,8 @@ def _recent_dialogue(dialogue):
     return list(reversed(tail))
 
 
-def _messages_with_memory(messages, session_id, *, character_setup=False):
-    summary = _summary_get(session_id)
+def _messages_with_memory(messages, session_id, *, character_setup=False, party_id=None):
+    summary = PARTIES.summary(party_id) if party_id else _summary_get(session_id)
     dialogue = _dialogue_messages(messages)
     parts = [message["content"] for message in messages
              if message.get("role") == "system"
@@ -689,8 +715,8 @@ def _messages_with_memory(messages, session_id, *, character_setup=False):
     return system + tail
 
 
-def _refresh_summary(dialogue, session_id, turn_id):
-    summary = _summary_get(session_id)
+def _refresh_summary(dialogue, session_id, turn_id, party_id=None):
+    summary = PARTIES.summary(party_id) if party_id else _summary_get(session_id)
     folded = summary["folded"]
     target = min(len(dialogue) - KEEP_RECENT, folded + SUMMARY_MAX_BATCH_MESSAGES)
     if target - folded < SUMMARY_BATCH_MESSAGES:
@@ -720,30 +746,34 @@ def _refresh_summary(dialogue, session_id, turn_id):
         choice = resp.choices[0]
         summary_text = (choice.message.content or "").strip()
         if summary_text and getattr(choice, "finish_reason", None) != "length":
-            _summary_put(session_id, summary_text, target)
+            if party_id:
+                PARTIES.save_summary(party_id, summary_text, target)
+            else:
+                _summary_put(session_id, summary_text, target)
     except Exception as exc:
         app.logger.warning("Не удалось обновить резюме: %s", type(exc).__name__)
 
 
-def _run_summary_job(dialogue, session_id, turn_id):
+def _run_summary_job(dialogue, session_id, turn_id, party_id=None):
     try:
         with app.app_context():
-            _refresh_summary(dialogue, session_id, turn_id)
+            _refresh_summary(dialogue, session_id, turn_id, party_id)
     finally:
         _SUMMARY_JOB.release()
 
 
-def _schedule_summary(messages, session_id, turn_id):
-    if not session_id:
+def _schedule_summary(messages, session_id, turn_id, party_id=None):
+    if not session_id and not party_id:
         return
     dialogue = _dialogue_messages(messages)
-    if len(dialogue) - _summary_get(session_id)["folded"] < KEEP_RECENT + SUMMARY_BATCH_MESSAGES:
+    summary = PARTIES.summary(party_id) if party_id else _summary_get(session_id)
+    if len(dialogue) - summary["folded"] < KEEP_RECENT + SUMMARY_BATCH_MESSAGES:
         return
     # No backlog: busy chat traffic can delay a refresh until a following turn.
     if not _SUMMARY_JOB.acquire(blocking=False):
         return
     try:
-        _SUMMARY_EXECUTOR.submit(_run_summary_job, dialogue, session_id, turn_id)
+        _SUMMARY_EXECUTOR.submit(_run_summary_job, dialogue, session_id, turn_id, party_id)
     except RuntimeError:
         _SUMMARY_JOB.release()
 
@@ -987,6 +1017,47 @@ def _item_name(item):
     return " ".join(item.casefold().split()) if isinstance(item, str) else ""
 
 
+def _inventory_with_ids(items):
+    result = []
+    for item in items if isinstance(items, list) else []:
+        name = _item_name(item)
+        if not name:
+            result.append(item)
+            continue
+        entry = dict(item) if isinstance(item, dict) else {"name": item, "quantity": 1}
+        entry["id"] = entry.get("id") or hashlib.sha256(("item:" + name).encode()).hexdigest()[:24]
+        result.append(entry)
+    return result
+
+
+def _transfer_items(items, transfers, latest):
+    owners = []
+    applied = set()
+    if not isinstance(transfers, list):
+        return items, owners
+    for event in transfers:
+        if not isinstance(event, dict) or not _grounded_event(event.get("evidence"), latest):
+            continue
+        item_id, quantity, holder = event.get("id"), event.get("quantity"), event.get("holder")
+        if not isinstance(item_id, str) or type(quantity) is not int or quantity <= 0:
+            continue
+        if not isinstance(holder, str) or not holder.strip():
+            continue
+        transfer = (item_id, quantity, _quest_name(holder), event["evidence"].strip())
+        if transfer in applied:
+            continue
+        item = next((item for item in items if isinstance(item, dict) and item.get("id") == item_id), None)
+        if not item or type(item.get("quantity", 1)) is not int or item.get("quantity", 1) < quantity:
+            continue
+        items = _remove_inventory_items(items, [{"id": item_id, "quantity": quantity}])
+        applied.add(transfer)
+        owners.append({"id": "item-" + item_id + "-" + _quest_name(holder), "subject": item["name"],
+                       "item_id": item_id,
+                       "detail": f"Передано: {quantity}.", "holder": holder,
+                       "source": event["evidence"], "status": "confirmed"})
+    return items, owners
+
+
 def _remove_inventory_items(items, removals):
     if not isinstance(removals, list):
         return items
@@ -995,12 +1066,14 @@ def _remove_inventory_items(items, removals):
         if not isinstance(removal, dict):
             continue
         name = _item_name(removal)
+        item_id = removal.get("id")
         quantity = removal.get("quantity", 1)
-        if not name or type(quantity) is not int or quantity <= 0:
+        if (not name and not isinstance(item_id, str)) or type(quantity) is not int or quantity <= 0:
             continue
         updated = []
         for item in remaining:
-            if quantity <= 0 or _item_name(item) != name:
+            matches = (isinstance(item, dict) and item.get("id") == item_id) if item_id else _item_name(item) == name
+            if quantity <= 0 or not matches:
                 updated.append(item)
                 continue
             count = item.get("quantity", 1) if isinstance(item, dict) else 1
@@ -1120,13 +1193,15 @@ class StateUnavailable(Exception):
     pass
 
 
-def _signed_roll(message, state, history):
+def _signed_roll(message, state, history, *, party=None):
     if not message or not isinstance(message.get("roll_receipt"), str):
         return None
     try:
         roll = ROLL_SIGNER.loads(message["roll_receipt"])
     except BadSignature as exc:
         raise ValueError("Бросок не удалось подтвердить. Обновите ход и повторите бросок.") from exc
+    if party and (roll.get("party_id"), roll.get("revision")) != (party["id"], party["revision"]):
+        raise ValueError("Этот бросок сделан в другой версии партии. Бросьте кубик снова.")
     return roll_result(active_check(state, history), roll)
 
 
@@ -1227,9 +1302,9 @@ def extract_state(messages, current_state, turn_id=None, result=None):
     if isinstance(model_inventory, list):
         # Для дельты достаточно имени и количества: описания предметов не нужны.
         model_state["inventory"] = [
-            {key: item[key] for key in ("name", "quantity") if key in item}
+            {key: item[key] for key in ("id", "name", "quantity") if key in item}
             if isinstance(item, dict) else item
-            for item in model_inventory
+            for item in _inventory_with_ids(model_inventory)
         ][:40]
     prompt = (f"ТЕКУЩЕЕ СОСТОЯНИЕ:\n{json.dumps(model_state, ensure_ascii=False)}\n\n"
               f"ПРЕДЫДУЩИЙ КОНТЕКСТ (события уже учтены):\n{context}\n\n"
@@ -1238,26 +1313,32 @@ def extract_state(messages, current_state, turn_id=None, result=None):
     new_character = (current.get("character_setup_pending")
                      or not (current.get("race") and current.get("class")))
     state_limit = QWEN_STATE_SETUP_LIMIT if new_character or next_upgrade_level is not None else QWEN_STATE_LIMIT
-    state_options = (_qwen_service_options(EXTRACT_MODEL, state_limit)
-                     or {"max_tokens": state_limit})
-    try:
-        with llm_slot() as ok:
-            if not ok:
-                raise RuntimeError("нет свободного слота модели")
-            resp = _measured_completion(turn_id, "state",
-                model=EXTRACT_MODEL,
-                messages=[{"role": "system", "content": STATE_EXTRACT_PROMPT},
-                         {"role": "user", "content": prompt}],
-                temperature=0.1,
-                **state_options,
-            )
-        state_choice = resp.choices[0]
-        if getattr(state_choice, "finish_reason", None) == "length":
-            raise ValueError("обновление листа обрезано по лимиту")
-        new_state = clean_json(state_choice.message.content or "")
-    except Exception as exc:
-        app.logger.warning("Извлечение состояния не удалось: %s", _short_error(exc))
-        raise StateUnavailable("Лист не обновился. Можно повторить сохранение этого хода.") from exc
+    state_messages = [{"role": "system", "content": STATE_EXTRACT_PROMPT},
+                      {"role": "user", "content": prompt}]
+    for attempt, limit in enumerate((state_limit, min(4400, state_limit * 2)), start=1):
+        state_options = _qwen_service_options(EXTRACT_MODEL, limit) or {"max_tokens": limit}
+        try:
+            with llm_slot() as ok:
+                if not ok:
+                    raise RuntimeError("нет свободного слота модели")
+                resp = _measured_completion(turn_id, "state", model=EXTRACT_MODEL,
+                                            messages=state_messages, temperature=0.1, **state_options)
+            state_choice = resp.choices[0]
+            if getattr(state_choice, "finish_reason", None) == "length":
+                raise ValueError("обновление листа обрезано по лимиту")
+            new_state = clean_json(state_choice.message.content or "")
+            if not isinstance(new_state, dict):
+                raise ValueError("ожидался JSON-объект изменений")
+            break
+        except ValueError as exc:
+            app.logger.warning("Извлечение состояния: ход=%s попытка=%s причина=%s",
+                               turn_id, attempt, type(exc).__name__)
+            if attempt == 2:
+                raise StateUnavailable("Мастер ответил, но изменения листа не удалось прочитать. "
+                                       "Повторите сохранение.") from exc
+        except Exception as exc:
+            app.logger.warning("Извлечение состояния: ход=%s причина=%s", turn_id, type(exc).__name__)
+            raise StateUnavailable("Лист не обновился. Можно повторить сохранение этого хода.") from exc
 
     if new_character:
         identity = initial_identity(latest, current)
@@ -1324,6 +1405,19 @@ def extract_state(messages, current_state, turn_id=None, result=None):
             raise StateUnavailable(f"Умение «{used_ability}» сейчас недоступно.")
         current["abilities"] = abilities
 
+    transfers = new_state.pop("item_transfers", None)
+    if transfers and not new_character:
+        current["inventory"], transfer_facts = _transfer_items(
+            _inventory_with_ids(current.get("inventory")), transfers, latest,
+        )
+        new_state["facts"] = merge_facts(new_state["facts"], transfer_facts)
+        transferred_names = {_item_name(fact["subject"]) for fact in transfer_facts}
+        transferred_ids = {fact["item_id"] for fact in transfer_facts}
+        for field in ("inventory", "inventory_remove"):
+            if isinstance(new_state.get(field), list):
+                new_state[field] = [item for item in new_state[field]
+                                    if _item_name(item) not in transferred_names
+                                    and (not isinstance(item, dict) or item.get("id") not in transferred_ids)]
     purchase = new_state.pop("purchase", None)
     if purchase and not new_character:
         if not _purchase(current, purchase, latest):
@@ -1510,10 +1604,12 @@ def _save_backup(path):
 
 def _save_candidates(cid, name):
     """Сначала своё сохранение, потом общее (старые файлы без префикса)."""
-    return [_save_path(cid, name), SAVES_DIR / f"{name}.json"]
+    owner = _owner()
+    private = [_save_path(owner, name)] if owner else []
+    return private + [_save_path(cid, name), SAVES_DIR / f"{name}.json"]
 
 
-def _collect_saves(cid):
+def _collect_saves(cid, *, shared_saves=True):
     """Имя → путь. Свои сохранения перекрывают одноимённые общие."""
     prefix = f"{cid}~"
     own, shared = {}, {}
@@ -1523,7 +1619,7 @@ def _collect_saves(cid):
         stem = p.stem
         if stem.startswith(prefix):
             own[stem[len(prefix):]] = p
-        elif "~" not in stem:
+        elif shared_saves and "~" not in stem:
             shared[stem] = p
     merged = dict(shared)
     merged.update(own)
@@ -1628,11 +1724,107 @@ def api_presence():
     return _presence_response(jsonify(presence), visitor_id)
 
 
+def _request_id(value):
+    if not isinstance(value, str) or not re.fullmatch(r"[a-f0-9]{32}", value):
+        raise ValueError("Неверный номер партии или хода.")
+    return value
+
+
+def _revision(data):
+    revision = data.get("revision")
+    if type(revision) is not int or revision < 0:
+        raise ValueError("Неверная версия партии.")
+    return revision
+
+
+def _snapshot_response(snapshot):
+    response = jsonify(snapshot)
+    response.headers["Cache-Control"] = "no-store"
+    return response
+
+
+@app.errorhandler(PartyMissing)
+def _party_missing(exc):
+    return jsonify({"error": str(exc), "code": "party_missing"}), 404
+
+
+@app.errorhandler(PartyConflict)
+def _party_conflict(exc):
+    return jsonify({"error": str(exc), "code": "party_conflict"}), 409
+
+
+@app.errorhandler(sqlite3.Error)
+def _party_storage_failure(exc):
+    app.logger.error("Ошибка записи партии: %s", type(exc).__name__)
+    return jsonify({"error": "Сохранение временно недоступно. Попробуйте ещё раз."}), 503
+
+
+@app.route("/api/parties", methods=["GET", "POST"])
+def api_parties():
+    if request.method == "GET":
+        return _snapshot_response(PARTIES.list(_owner()))
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict):
+        return jsonify({"error": "Партия не прочитана."}), 400
+    try:
+        party_id = _request_id(data.get("id"))
+        source = data.get("snapshot")
+        if not isinstance(source, dict):
+            raise ValueError("Партия не прочитана.")
+        state, history = source.get("state"), source.get("messages")
+        if (not isinstance(state, dict) or not isinstance(history, list)
+                or any(not isinstance(m, dict) or m.get("role") not in ("user", "assistant", "system")
+                       or not isinstance(m.get("content"), str) for m in history)):
+            raise ValueError("Сохранение содержит недопустимые данные.")
+        token = _owner_token() or secrets.token_urlsafe(32)
+        response = _snapshot_response(PARTIES.create(_owner(token), party_id, state, history, source.get("memory")))
+        if not _owner_token():
+            _set_owner_cookie(response, token)
+        return response
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
+
+
+@app.route("/api/parties/<party_id>")
+def api_party(party_id):
+    return _snapshot_response(PARTIES.get(_owner(), party_id))
+
+
+@app.route("/api/parties/<party_id>/discard", methods=["POST"])
+def api_party_discard(party_id):
+    data = request.get_json(silent=True) or {}
+    try:
+        return _snapshot_response(PARTIES.discard(
+            _owner(), party_id, _revision(data), _request_id(data.get("request_id")),
+        ))
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
+
+
+@app.route("/api/parties/<party_id>/notes", methods=["POST"])
+def api_party_note(party_id):
+    data = request.get_json(silent=True) or {}
+    if not isinstance(data.get("id"), str) or data.get("action") not in ("read", "delete"):
+        return jsonify({"error": "Не удалось прочитать изменение заметки."}), 400
+    try:
+        return _snapshot_response(PARTIES.note(
+            _owner(), party_id, _revision(data), data["id"], data["action"] == "delete",
+        ))
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
+
+
 @app.route("/api/roll", methods=["POST"])
 def api_roll():
     data = request.get_json(silent=True) or {}
     try:
-        state, messages = data.get("state") or {}, data.get("messages") or []
+        party = None
+        if "party_id" in data:
+            party = PARTIES.get(_owner(), _request_id(data["party_id"]))
+            if party["revision"] != _revision(data) or party["draft"]:
+                raise PartyConflict("Партия изменилась или ждёт сохранения хода. Откройте её снова.")
+        state, messages = ((party["state"], party["messages"]) if party else
+                           (data.get("state") or {}, data.get("messages") or []))
         if not isinstance(state, dict) or not isinstance(messages, list):
             raise ValueError("Не удалось прочитать состояние проверки.")
         check = active_check(state, messages)
@@ -1641,6 +1833,8 @@ def api_roll():
             raise ValueError(f"Ожидается бросок {check['expr']}. Сначала разрешите проверку.")
         roll = roll_dice(expression)
         roll["check_id"] = check["id"] if check else None
+        if party:
+            roll.update(party_id=party["id"], revision=party["revision"])
         result = roll_result(check, roll)
         result["receipt"] = ROLL_SIGNER.dumps(roll)
         return jsonify(result)
@@ -1652,8 +1846,31 @@ def api_roll():
 def api_chat():
     started_at = perf_counter()
     data = request.get_json(silent=True) or {}
-    messages = data.get("messages") or []
-    game_state = data.get("state") or DEFAULT_STATE
+    party = None
+    request_id = None
+    owner = _owner()
+    if "party_id" in data:
+        try:
+            request_id = _request_id(data.get("request_id"))
+            party, staged = PARTIES.turn(owner, _request_id(data["party_id"]), _revision(data), request_id)
+        except ValueError as exc:
+            return jsonify({"error": str(exc)}), 400
+        if staged:
+            return Response(staged["reply"]["content"] + TURN_COMPLETE,
+                            mimetype="text/plain; charset=utf-8",
+                            headers={"Cache-Control": "no-store", "X-Turn-Id": request_id})
+        move = data.get("action")
+        if (not isinstance(move, dict) or not isinstance(move.get("content"), str)
+                or not move["content"].strip()):
+            return jsonify({"error": "Действие игрока отсутствует."}), 400
+        action = {"role": "user", "content": move["content"]}
+        if isinstance(move.get("roll_receipt"), str):
+            action["roll_receipt"] = move["roll_receipt"]
+        messages = party["messages"] + [action]
+        game_state = party["state"]
+    else:
+        messages = data.get("messages") or []
+        game_state = data.get("state") or DEFAULT_STATE
     if not isinstance(messages, list) or not messages or any(
         not isinstance(message, dict) or not isinstance(message.get("content"), str) for message in messages
     ):
@@ -1662,18 +1879,24 @@ def api_chat():
         game_state = DEFAULT_STATE
     setup_turn = bool(game_state.get("character_setup_pending")
                       or not (game_state.get("race") and game_state.get("class")))
-    if messages[0].get("role") != "system":
+    action = messages[-1]
+    history = messages[:-1]
+    if party or messages[0].get("role") != "system":
         prompt = SYSTEM_PROMPT
         if setup_turn:
             prompt += CHARACTER_CREATION_RULES
-        messages = [{"role": "system", "content": prompt}] + messages
-    action = messages[-1]
-    history = messages[:-1]
+        messages = [{"role": "system", "content": prompt}] + [
+            message for message in messages if message.get("role") != "system"
+        ]
     check = active_check(game_state, history)
     try:
-        result = _signed_roll(action, game_state, history)
+        result = _signed_roll(action, game_state, history, party=party)
     except ValueError as exc:
         return jsonify({"error": str(exc)}), 409
+    if party and result:
+        action["roll"] = result
+        action["content"] = f"[[БРОСОК]] {result['expr']} = {result['total']}."
+        action.pop("roll_receipt", None)
     state_context = {key: game_state[key] for key in STATE_FIELDS if key in game_state}
     query = str(action.get("content", ""))
     scene = game_state.get("scene")
@@ -1748,9 +1971,10 @@ def api_chat():
         "role": "system",
         "content": (state_note + json.dumps(state_context, ensure_ascii=False) + length_note),
     }] + messages[1:]
-    turn_id = uuid4().hex
+    turn_id = request_id or uuid4().hex
     messages = _messages_with_memory(
         messages, _header_token("X-Session-Id", 64), character_setup=setup_turn,
+        party_id=party["id"] if party else None,
     )
 
     visitor_id = request.cookies.get(PRESENCE_COOKIE, "")
@@ -1915,16 +2139,73 @@ def api_chat():
                 flush=True,
             )
 
+    def persist_reply():
+        parts = []
+        for chunk in generate():
+            if chunk == TURN_COMPLETE and party:
+                try:
+                    PARTIES.stage(owner, party["id"], party["revision"], request_id, action,
+                                  {"role": "assistant", "content": "".join(parts)})
+                except PartyConflict:
+                    yield "\n[Ошибка API: партия изменилась. Откройте её снова.]"
+                    return
+                except sqlite3.Error as exc:
+                    app.logger.error("Не удалось записать ответ мастера: %s", type(exc).__name__)
+                    yield "\n[Ошибка API: ответ пока не сохранился. Повторите тот же ход.]"
+                    return
+            elif party:
+                parts.append(chunk)
+            yield chunk
+
     return Response(
-        stream_with_context(generate()),
+        stream_with_context(persist_reply()),
         mimetype="text/plain; charset=utf-8",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no", "X-Turn-Id": turn_id},
     )
 
 
+def _commit_party_turn(data):
+    owner = _owner()
+    party_id = _request_id(data["party_id"])
+    request_id = _request_id(data.get("request_id"))
+    revision = _revision(data)
+    party, draft = PARTIES.turn(owner, party_id, revision, request_id)
+    if not draft:
+        raise PartyConflict("Ответ мастера ещё не сохранён.")
+    if draft["committed_revision"] is not None:
+        return _snapshot_response(party)
+    history = party["messages"] + [draft["action"], draft["reply"]]
+    state = party["state"]
+    updated = extract_state(history, state, request_id, draft["action"].get("roll"))
+    reply = dict(draft["reply"])
+    details = []
+    for key, label, unit in (("xp", "Опыт", " XP"), ("gold", "Золото", " зм"),
+                             ("silver", "Серебро", " см"), ("copper", "Медь", " мм")):
+        previous, current = state.get(key, 0), updated.get(key, 0)
+        if type(previous) is int and type(current) is int and previous != current:
+            details.append(f"{label} {previous} → {current}{unit}")
+    if isinstance(state.get("hp"), int) and state["hp"] != updated["hp"]:
+        details.append(f"Здоровье {state['hp']} → {updated['hp']}/{updated['max_hp']} HP")
+    if details and state.get("race") and state.get("class") and not state.get("character_setup_pending"):
+        reply["resolution"] = " · ".join(details)
+    saved = PARTIES.commit(owner, party_id, revision, request_id, updated, reply)
+    try:
+        _schedule_summary(saved["messages"], "", request_id, party_id)
+    except sqlite3.Error:
+        app.logger.warning("Не удалось запланировать обновление памяти партии")
+    return _snapshot_response(saved)
+
+
 @app.route("/api/state", methods=["POST"])
 def api_state():
     data = request.get_json(silent=True) or {}
+    if "party_id" in data:
+        try:
+            return _commit_party_turn(data)
+        except StateUnavailable as exc:
+            return jsonify({"error": str(exc)}), 503
+        except ValueError as exc:
+            return jsonify({"error": str(exc)}), 409
     messages = data.get("messages") or []
     state = data.get("state") or DEFAULT_STATE
     if (not isinstance(state, dict) or not isinstance(messages, list) or not messages
@@ -1954,6 +2235,8 @@ def api_state():
 def api_saves_list():
     """Список сохранений игрока: имя, время записи, размер. Новые сверху."""
     saves = _collect_saves(_client_id())
+    if _owner():
+        saves.update(_collect_saves(_owner(), shared_saves=False))
     items = [_save_info(name, path) for name, path in saves.items()]
     items.sort(key=lambda x: x["saved_at"], reverse=True)
     return jsonify(items)
@@ -1963,9 +2246,19 @@ def api_saves_list():
 def api_save():
     data = request.get_json(silent=True) or {}
     name = _safe_name(data.get("name")) or "default"
-    path = _save_path(_client_id(), name)
+    party = None
+    if "party_id" in data:
+        try:
+            party = PARTIES.get(_owner(), _request_id(data["party_id"]))
+            if party["revision"] != _revision(data) or party["draft"]:
+                raise PartyConflict("Партия изменилась или ждёт сохранения хода. Откройте её снова.")
+        except ValueError as exc:
+            return jsonify({"error": str(exc)}), 400
+    path = _save_path(_owner() or _client_id(), name)
     payload = {"schema_version": 3, "messages": data.get("messages") or [],
                "state": data.get("state") or DEFAULT_STATE}
+    if party:
+        payload.update(messages=party["messages"], state=party["state"], memory=party["memory"])
     serialized = json.dumps(payload, ensure_ascii=False, indent=2)
     # Backup previous file before replacing; atomic replace avoids partial JSON on crash.
     if path.exists():
@@ -2002,7 +2295,7 @@ def api_save_rename():
     if src is None:
         return jsonify({"ok": False, "error": "сохранение не найдено"}), 404
 
-    dst = _save_path(cid, new)
+    dst = _save_path(_owner() or cid, new)
     if dst.exists():
         return jsonify({"ok": False, "error": "сохранение с таким именем уже есть"}), 409
     try:
@@ -2024,7 +2317,8 @@ def api_save_delete():
 
     cid = _client_id()
     removed = []
-    for path in _save_candidates(cid, name):
+    path = next((candidate for candidate in _save_candidates(cid, name) if candidate.exists()), None)
+    if path:
         for f in (path, _save_backup(path)):
             if f.exists():
                 try:

@@ -48,6 +48,15 @@ class CampaignTest(unittest.TestCase):
         restored, _ = apply_ability_event(spent, rest="short_rest")
         self.assertEqual(restored, [{**stance, "uses_left": 2}, passive])
 
+    def test_dragon_breath_matches_legacy_name_with_a_damage_description(self):
+        record = {"name": "Дыхание дракона, линия кислоты 1d6", "uses_max": 1,
+                  "uses_left": 1, "recharge": "short_rest"}
+        updated, used = apply_ability_event([record], "Дыхание дракона")
+        self.assertTrue(used)
+        self.assertEqual(updated[0]["uses_left"], 0)
+        self.assertFalse(apply_ability_event(updated, "Дыхание дракона")[1])
+        self.assertEqual(apply_ability_event(updated, rest="short_rest")[0][0]["uses_left"], 1)
+
     def test_legacy_unlimited_ability_has_no_charge_counter(self):
         legacy = {
             "name": "**Мистический заряд 1d10&#x20;**",

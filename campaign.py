@@ -271,7 +271,11 @@ def clean_ability_name(name):
 
 
 def ability_key(name):
-    return clean_ability_name(name).casefold()
+    label = clean_ability_name(name).casefold()
+    for standard in ("дыхание дракона", "второе дыхание", "мистический заряд"):
+        if label == standard or re.match(re.escape(standard) + r"[,:( —-]", label):
+            return standard
+    return label
 
 
 def _negative_count(value):

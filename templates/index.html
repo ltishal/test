@@ -468,7 +468,7 @@
 </dialog>
 
 <script>
-let messages = [], state = null, busy = false, draftTurn = null;
+let messages = [], state = null, busy = false, draftTurn = null, partyRef = null, partyMemory = null;
 const chatEl = document.getElementById('chat');
 const inputEl = document.getElementById('input');
 const sendBtn = document.getElementById('send-btn');
@@ -581,7 +581,7 @@ const READY_WORLDS = [
 let saveWarning = false;
 function persist() {
   try {
-    localStorage.setItem(LS_KEY, JSON.stringify({messages, state, draftTurn}));
+    localStorage.setItem(LS_KEY, JSON.stringify({messages, state, draftTurn, partyRef, partyMemory}));
     saveWarning = false;
   } catch (error) {
     if (!saveWarning) addMsg('system', 'Автосохранение недоступно. Проверьте сохранение партии через меню.');
@@ -757,7 +757,7 @@ function openCharacterBuilder(world = null) {
       return;
     }
     if (busy || draftTurn || !gameAccess
-        || (messages.length && !confirm('Начать новую игру? Текущая история будет заменена.'))) return;
+        || (messages.length && !confirm('Начать новую игру? Текущая партия останется в списке сохранений.'))) return;
     characterDialog.close();
     startCharacterGame({name: name.trim(), ...choices}, world, scene.trim());
   };
@@ -766,9 +766,22 @@ function openCharacterBuilder(world = null) {
   document.getElementById('character-step-title').focus();
 }
 
-function startCharacterGame(character, world, scene) {
+async function startCharacterGame(character, world, scene) {
   if (busy || draftTurn) return;
+  if (messages.length && partyRef?.revision == null) {
+    setTurnBusy(true);
+    try {
+      await ensureParty();
+    } catch (error) {
+      addMsg('system', 'Сначала нужно сохранить текущую партию: ' + error.message);
+      return;
+    } finally {
+      setTurnBusy(false);
+    }
+  }
   messages = [];
+  partyRef = null;
+  partyMemory = null;
   state = {...EMPTY_STATE, name: '', ...character, character_setup_pending: true};
   resetSession();
   ttsStop();
@@ -1189,6 +1202,98 @@ function setTurnBusy(value) {
 
 const TURN_COMPLETE = '\n[[ХОД_ЗАВЕРШЁН]]';
 
+function requestId() {
+  return Array.from(crypto.getRandomValues(new Uint8Array(16)),
+    byte => byte.toString(16).padStart(2, '0')).join('');
+}
+
+async function partyRequest(url, body) {
+  const options = body === undefined ? {cache: 'no-store'} : {
+    method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(body),
+  };
+  const response = await fetch(url, options);
+  const result = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    const error = new Error(result.error || 'HTTP ' + response.status);
+    error.code = result.code;
+    throw error;
+  }
+  return result;
+}
+
+function partyPayload() {
+  return {party_id: partyRef.id, revision: partyRef.revision};
+}
+
+function useParty(snapshot, keepLocalDraft = false) {
+  const sameBase = partyRef?.id === snapshot.id && partyRef?.revision === snapshot.revision;
+  partyRef = {id: snapshot.id, revision: snapshot.revision};
+  messages = snapshot.messages;
+  state = snapshot.state;
+  partyMemory = snapshot.memory || null;
+  if (snapshot.draft) {
+    const draft = snapshot.draft;
+    draftTurn = {requestId: draft.request_id, action: draft.action,
+      reply: draft.reply, partyId: snapshot.id, revision: draft.revision};
+  } else if (!keepLocalDraft || !sameBase) {
+    draftTurn = null;
+  }
+  persist();
+}
+
+function redrawParty() {
+  renderAll();
+  renderStatus();
+  if (draftTurn) {
+    if (draftTurn.action.roll) showRoll(draftTurn.action);
+    renderDraft();
+  } else {
+    renderPendingCheck();
+  }
+}
+
+async function ensureParty() {
+  if (partyRef?.revision != null) return;
+  partyRef ||= {id: requestId(), revision: null};
+  persist();
+  const snapshot = await partyRequest('/api/parties', {id: partyRef.id, snapshot: {messages, state, memory: partyMemory}});
+  const local = draftTurn;
+  useParty(snapshot);
+  if (local && !draftTurn && snapshot.revision === 0) {
+    // A draft from the old client has no server-side record. Re-generate the same text action.
+    draftTurn = {action: local.action, requestId: local.requestId || requestId(),
+      partyId: snapshot.id, revision: snapshot.revision};
+    persist();
+  }
+}
+
+async function importParty(data) {
+  return partyRequest('/api/parties', {
+    id: requestId(), snapshot: {
+      messages: data.messages || [], state: data.state || EMPTY_STATE, memory: data.memory,
+    },
+  });
+}
+
+async function restoreServerParty() {
+  if (!gameAccess || busy || (!partyRef && !messages.length && !draftTurn)) return;
+  setTurnBusy(true);
+  try {
+    if (partyRef?.revision != null) {
+      const snapshot = await partyRequest('/api/parties/' + partyRef.id);
+      useParty(snapshot, true);
+    } else {
+      await ensureParty();
+    }
+    redrawParty();
+  } catch (error) {
+    // Keep the browser copy available for export even when the server is unavailable.
+    addMsg('system', 'Серверную партию пока не удалось открыть: ' + error.message);
+  } finally {
+    setTurnBusy(false);
+  }
+}
+
 function renderDraft(message) {
   document.getElementById('turn-retry')?.remove();
   if (!draftTurn) return;
@@ -1206,16 +1311,27 @@ function renderDraft(message) {
   const cancel = document.createElement('button');
   cancel.className = 'btn';
   cancel.textContent = 'Отменить незавершённый ход';
-  cancel.onclick = () => {
+  cancel.onclick = async () => {
     if (busy || !confirm('Вернуться к последнему сохранённому состоянию?')) return;
-    if (!draftTurn.action.roll_receipt) inputEl.value = draftTurn.action.content;
-    draftTurn = null;
-    persist();
-    renderAll();
-    renderPendingCheck();
-    setTurnBusy(false);
-    autosize();
-    inputEl.focus();
+    const draft = draftTurn;
+    setTurnBusy(true);
+    try {
+      if (partyRef?.revision != null && draft.requestId && draft.partyId === partyRef.id) {
+        await partyRequest('/api/parties/' + partyRef.id + '/discard', {
+          revision: draft.revision, request_id: draft.requestId,
+        });
+      }
+      if (!draft.action.roll_receipt && !draft.action.roll) inputEl.value = draft.action.content;
+      draftTurn = null;
+      persist();
+      redrawParty();
+      autosize();
+      inputEl.focus();
+    } catch (error) {
+      renderDraft(error.message);
+    } finally {
+      setTurnBusy(false);
+    }
   };
   notice.appendChild(cancel);
   scrollBottom();
@@ -1223,29 +1339,40 @@ function renderDraft(message) {
 
 async function callAI(pending) {
   if (pending) {
-    draftTurn = {action: pending};
+    draftTurn = {action: pending, requestId: requestId(),
+      partyId: partyRef?.id, revision: partyRef?.revision};
     persist();
   }
   if (!draftTurn) return;
   setTurnBusy(true);
   if (tts.speaking) ttsStop();
-  const draft = draftTurn;
   const md = document.createElement('div');
   md.className = 'msg master typing-indicator';
   chatEl.appendChild(md);
   scrollBottom();
   try {
     if (!gameAccess) throw new Error('Игра временно недоступна.');
+    await ensureParty();
+    if (!draftTurn) {
+      redrawParty();
+      return;
+    }
+    const draft = draftTurn;
+    draft.requestId ||= requestId();
+    draft.partyId ||= partyRef.id;
+    draft.revision ??= partyRef.revision;
+    persist();
     if (!draft.reply) {
       const res = await fetch('/api/chat', {
         method: 'POST', headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({messages: [...messages, draft.action], state})
+        body: JSON.stringify({...partyPayload(), request_id: draft.requestId, action: draft.action})
       });
       if (!res.ok) {
         const problem = await res.json().catch(() => ({}));
-        throw new Error(problem.error || 'HTTP ' + res.status);
+        const error = new Error(problem.error || 'HTTP ' + res.status);
+        error.code = problem.code;
+        throw error;
       }
-      const turnId = res.headers.get('X-Turn-Id') || '';
       const reader = res.body.getReader();
       const dec = new TextDecoder();
       let full = '';
@@ -1265,50 +1392,43 @@ async function callAI(pending) {
       full = full.slice(0, -TURN_COMPLETE.length);
       if (!full.trim()) throw new Error('Мастер вернул пустой ответ.');
       draft.reply = {role: 'assistant', content: full};
-      draft.turnId = turnId;
       persist();
     }
-    const history = [...messages, draft.action, draft.reply];
-    const headers = {'Content-Type': 'application/json'};
-    if (draft.turnId) headers['X-Turn-Id'] = draft.turnId;
-    const response = await fetch('/api/state', {
-      method: 'POST', headers, body: JSON.stringify({messages: history, state})
-    });
-    if (!response.ok) {
-      const problem = await response.json().catch(() => ({}));
-      throw new Error(problem.error || 'Лист не обновился.');
-    }
-    const updated = await response.json();
+    md.classList.remove('typing-indicator');
+    md.textContent = draft.reply.content.replaceAll('[[ЛИСТ]]', '').replaceAll('[[/ЛИСТ]]', '')
+      + '\n\nСохраняю ход…';
+    scrollBottom();
     const oldLevel = Number(state?.level || 1);
-
-    const hpBefore = Number(state?.hp);
-    const gainedXP = Number(updated.xp || 0) - Number(state?.xp || 0);
-    const resolution = [];
-    if (gainedXP > 0) resolution.push('Опыт начислен: +' + gainedXP + ' XP.');
-    if (Number.isFinite(hpBefore) && hpBefore !== updated.hp) {
-      resolution.push('Здоровье: ' + hpBefore + ' → ' + updated.hp + '/' + updated.max_hp + ' HP.');
-    }
-    if (resolution.length) draft.reply.resolution = resolution.join(' ');
-    messages = history;
-    state = updated;
-    draftTurn = null;
-    persist();
+    const snapshot = await partyRequest('/api/state', {...partyPayload(), request_id: draft.requestId});
+    useParty(snapshot);
     md.remove();
-    const finalMsg = addMsg('master', draft.reply.content);
-    if (draft.reply.resolution) addMsg('system', draft.reply.resolution);
+    redrawParty();
+    const final = messages.at(-1);
+    const speakers = chatEl.querySelectorAll('.speak-btn');
+    const speaker = speakers[speakers.length - 1];
     if (Number(state.level || 1) > oldLevel) {
       addMsg('system', '🎉 Доступно повышение уровня: ' + state.level + '. Обсуди улучшение с мастером.');
     }
-    renderStatus();
-    renderPendingCheck();
-    tts.lastText = draft.reply.content;
-    if (tts.enabled && tts.available) {
-      setTimeout(() => ttsSpeak(draft.reply.content, finalMsg.querySelector('.speak-btn')), 60);
+    if (tts.enabled && tts.available && final?.role === 'assistant') {
+      setTimeout(() => ttsSpeak(final.content, speaker), 60);
     }
   } catch (error) {
     md.remove();
-    renderAll();
-    renderDraft(error.message);
+    if (error.code === 'party_conflict' && partyRef) {
+      try {
+        const localAction = draftTurn?.action;
+        useParty(await partyRequest('/api/parties/' + partyRef.id));
+        if (!draftTurn && localAction && !localAction.roll) inputEl.value = localAction.content;
+        redrawParty();
+        addMsg('system', 'Загружена актуальная версия партии.');
+      } catch {
+        renderAll();
+        renderDraft(error.message);
+      }
+    } else {
+      renderAll();
+      renderDraft(error.message);
+    }
   } finally {
     setTurnBusy(false);
     refreshPresence();
@@ -1381,12 +1501,8 @@ async function doRoll(expr) {
   setTurnBusy(true);
   document.getElementById('pending-check')?.remove();
   try {
-    const res = await fetch('/api/roll', {
-      method: 'POST', headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({expr, state, messages: messages.slice(-1)})
-    });
-    const dice = await res.json();
-    if (!res.ok) throw new Error(dice.error || 'Не удалось бросить кубик.');
+    await ensureParty();
+    const dice = await partyRequest('/api/roll', {...partyPayload(), expr});
     const {receipt, ...roll} = dice;
     const move = {
       role: 'user', content: '[[БРОСОК]] ' + roll.expr + ' = ' + roll.total + '.',
@@ -1548,7 +1664,7 @@ async function doSheet() {
 /* NOTES — отдельная вкладка */
 async function doNotes() {
   if (!state) return;
-  const notes = (state.notes || []).slice();
+  const notes = (state.notes || []).map(note => ({...note}));
 
   const typeOrder = ['notification', 'letter', 'document', 'journal', 'note', 'rumor'];
   const types = [...new Set(notes.map(n => n.type || 'note'))].sort((a, b) => {
@@ -1618,11 +1734,8 @@ async function doNotes() {
         if (note) {
           note._expanded = !note._expanded;
           // Раскрытие = прочитано
-          if (note.unread) {
-            note.unread = false;
-            saveNotesToState();
-          }
-          renderList();
+          if (note.unread && !busy && !draftTurn) updateNote(id, 'read');
+          else renderList();
         }
       };
     });
@@ -1630,30 +1743,31 @@ async function doNotes() {
       btn.onclick = (e) => {
         e.stopPropagation();
         const id = btn.dataset.id;
-        const action = btn.dataset.action;
-        const idx = notes.findIndex(n => n.id === id);
-        if (idx === -1) return;
-        if (action === 'read') {
-          notes[idx].unread = false;
-        } else if (action === 'delete') {
-          notes.splice(idx, 1);
-        }
-        saveNotesToState();
-        renderList();
-        updateNotesBadge();
+        updateNote(id, btn.dataset.action);
       };
     });
   }
 
-  function saveNotesToState() {
-    // Убираем служебное поле _expanded перед сохранением
-    state.notes = notes.map(n => {
-      const copy = { ...n };
-      delete copy._expanded;
-      return copy;
-    });
-    persist();
-    renderStatus();
+  async function updateNote(id, action) {
+    if (busy || draftTurn) return;
+    setTurnBusy(true);
+    try {
+      await ensureParty();
+      const snapshot = await partyRequest('/api/parties/' + partyRef.id + '/notes', {
+        revision: partyRef.revision, id, action,
+      });
+      const expanded = new Set(notes.filter(note => note._expanded).map(note => note.id));
+      useParty(snapshot);
+      notes.splice(0, notes.length, ...(state.notes || []).map(note => ({
+        ...note, _expanded: expanded.has(note.id),
+      })));
+      renderList();
+      renderStatus();
+    } catch (error) {
+      addMsg('system', 'Не удалось обновить заметку: ' + error.message);
+    } finally {
+      setTurnBusy(false);
+    }
   }
 
   renderList();
@@ -1777,9 +1891,10 @@ async function doSave(name) {
   } catch (e) { /* список недоступен — просто сохраняем */ }
 
   try {
+    await ensureParty();
     const res = await fetch('/api/save', {
       method: 'POST', headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({name, messages, state})
+      body: JSON.stringify({name, ...partyPayload()})
     });
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     const d = await res.json();
@@ -1793,17 +1908,19 @@ async function doSave(name) {
 function savesModal() {
   return new Promise(resolve => {
     let items = [];
+    let parties = [];
     let note = '';
     let closed = false;
 
     const finish = v => { if (!closed) { closed = true; modalEl.classList.remove('open'); resolve(v); } };
 
     async function refresh() {
-      try {
-        const r = await fetch('/api/saves');
-        const d = await r.json();
-        items = Array.isArray(d) ? d : [];
-      } catch (e) { items = []; }
+      const [manual, automatic] = await Promise.allSettled([
+        partyRequest('/api/saves'), partyRequest('/api/parties'),
+      ]);
+      items = manual.status === 'fulfilled' && Array.isArray(manual.value) ? manual.value : [];
+      parties = automatic.status === 'fulfilled' && Array.isArray(automatic.value) ? automatic.value : [];
+      if (manual.status === 'rejected' && automatic.status === 'rejected') note = 'Список временно недоступен.';
       render();
     }
 
@@ -1818,13 +1935,23 @@ function savesModal() {
           <button class="note-action-btn" data-act="delete" data-name="${esc(s.name)}" title="Удалить">🗑</button>
         </div>`).join('') : '<div class="tag empty">нет сохранений</div>';
 
+      const partyRows = parties.map(p => `
+        <button type="button" class="btn party-choice" data-party="${esc(p.id)}">
+          ${esc(p.name)}${p.location ? ' · ' + esc(p.location) : ''} · ${esc(fmtTime(p.updated_at))}
+        </button>`).join('');
       modalContent.innerHTML = `
         <h3>📂 Сохранения</h3>
         ${note ? `<div class="save-note">${esc(note)}</div>` : ''}
-        <div style="display:flex;flex-direction:column;gap:8px;max-height:55vh;overflow-y:auto">${rows}</div>
+        <div style="display:flex;flex-direction:column;gap:8px;max-height:55vh;overflow-y:auto">
+          ${partyRows ? '<h4>Партии с автосохранением</h4>' + partyRows : ''}
+          <h4>Именованные сохранения</h4>${rows}
+        </div>
         <button class="btn primary" id="modal-cancel">Закрыть</button>`;
       modalEl.classList.add('open');
 
+      modalContent.querySelectorAll('.party-choice').forEach(button => {
+        button.onclick = () => finish({id: button.dataset.party});
+      });
       modalContent.querySelectorAll('.save-name').forEach(el => {
         el.onclick = () => finish(el.dataset.name);
       });
@@ -1875,15 +2002,17 @@ async function doLoad(name) {
     if (!name || busy || draftTurn) return;
   }
   try {
-    const res = await fetch('/api/load/' + encodeURIComponent(name));
-    if (!res.ok) throw new Error('не найдено');
-    const d = await res.json();
-    messages = d.messages || [];
-    state = d.state || {...EMPTY_STATE};
-    resetSession();                 // резюме прежней партии больше не актуально
-    persist(); renderAll(); renderStatus(); renderPendingCheck();
-    addMsg('system', `📂 Загружено: «${name}»`);
+    setTurnBusy(true);
+    if (messages.length && partyRef?.revision == null) await ensureParty();
+    const snapshot = typeof name === 'object'
+      ? await partyRequest('/api/parties/' + name.id)
+      : await importParty(await partyRequest('/api/load/' + encodeURIComponent(name)));
+    resetSession();
+    useParty(snapshot);
+    redrawParty();
+    addMsg('system', `📂 Загружено: «${typeof name === 'object' ? state.name || 'Новая партия' : name}»`);
   } catch(e) { addMsg('system', 'Ошибка: ' + e.message); }
+  finally { setTurnBusy(false); }
 }
 
 /* ═══════════ ПЕРЕНОС ПАРТИИ ═══════════
@@ -1897,7 +2026,7 @@ async function doLoad(name) {
                 инвентарь, заметки, квесты, отношения. */
 
 function doTransfer() {
-  const current = JSON.stringify({messages, state});
+  const current = JSON.stringify({messages, state, memory: partyMemory});
   const charName = (state && state.name) || 'Пустой';
 
   modalContent.innerHTML = `
@@ -1981,7 +2110,7 @@ function doTransfer() {
     reader.readAsText(f);
   };
 
-  document.getElementById('transfer-apply').onclick = () => {
+  document.getElementById('transfer-apply').onclick = async () => {
     if (busy || draftTurn) { showInfo('Дождитесь завершения хода.', true); return; }
     const raw = area.value.trim();
     if (!raw) { showInfo('Поле пустое.', true); return; }
@@ -2002,20 +2131,22 @@ function doTransfer() {
     const lvl = (d.state && d.state.level) || 1;
     if (!confirm(`Заменить текущую партию?\n\n` +
                  `Загружаемая: «${nm}», уровень ${lvl}, сообщений ${d.messages.length}.\n` +
-                 `Текущая партия будет потеряна.`)) return;
+                 `Текущая партия останется в списке сохранений.`)) return;
 
-    messages = d.messages;
-    state = d.state || {...EMPTY_STATE};
-    resetSession();
-    persist();
-    chatEl.innerHTML = '';
-    renderAll();
-    renderStatus();
-    renderPendingCheck();
-    modalEl.classList.remove('open');
-    addMsg('system',
-      `🔄 Партия загружена: «${state.name || 'Пустой'}», уровень ${state.level || 1}, ` +
-      `сообщений ${messages.length}. Нажмите «💾 Сохранить», чтобы она попала на сервер.`);
+    setTurnBusy(true);
+    try {
+      if (messages.length && partyRef?.revision == null) await ensureParty();
+      const snapshot = await importParty(d);
+      resetSession();
+      useParty(snapshot);
+      redrawParty();
+      modalEl.classList.remove('open');
+      addMsg('system', `🔄 Партия загружена: «${state.name || 'Пустой'}».`);
+    } catch (error) {
+      showInfo(error.message, true);
+    } finally {
+      setTurnBusy(false);
+    }
   };
 
   modalEl.classList.add('open');
@@ -2194,8 +2325,10 @@ document.querySelectorAll('#drawer .btn[data-action]').forEach(btn => {
 
 function init() {
   const saved = restore();
-  if (saved && (saved.messages.length || saved.draftTurn)) {
+  if (saved && (saved.messages.length || saved.draftTurn || saved.partyRef)) {
     messages = saved.messages;
+    partyRef = saved.partyRef || null;
+    partyMemory = saved.partyMemory || null;
     draftTurn = saved.draftTurn || null;
     state = saved.state || {...EMPTY_STATE};
     // Совместимость
@@ -2247,7 +2380,7 @@ function init() {
   autosize();
 }
 init();
-refreshPresence();
+refreshPresence().then(restoreServerParty);
 setInterval(refreshPresence, 15000);
 document.addEventListener('visibilitychange', () => {
   if (!document.hidden) refreshPresence();
