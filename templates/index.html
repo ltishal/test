@@ -111,6 +111,35 @@
     background: var(--bg-panel); border: 1px dashed var(--border-subtle);
     padding: 8px 14px; max-width: 95%; text-align: center; border-radius: 8px;
   }
+  .msg.master > div { margin-bottom: 10px; }
+  .msg.master > div:last-of-type { margin-bottom: 0; }
+  .msg.master .master-text { white-space: pre-wrap; }
+  .sheet-card {
+    white-space: normal; padding: 12px 14px;
+    background: var(--bg-card); border: 1px solid var(--border-subtle);
+    border-left: 3px solid var(--accent-gold); border-radius: 10px;
+    display: flex; flex-direction: column; gap: 8px;
+    font-family: var(--font-sans); box-shadow: 0 2px 10px rgba(0,0,0,0.25);
+  }
+  .sheet-head {
+    font-family: var(--font-serif); font-size: 17px; font-weight: 700;
+    color: var(--accent-gold); line-height: 1.3;
+  }
+  .sheet-chips { display: flex; flex-wrap: wrap; gap: 5px; }
+  .stat-chip {
+    background: var(--bg-deep); border: 1px solid var(--border-subtle);
+    border-radius: 6px; padding: 3px 8px; white-space: nowrap;
+    font-family: 'SF Mono', Menlo, monospace; font-size: 12px; color: var(--text-primary);
+  }
+  .stat-chip b { color: var(--accent-gold); font-weight: 700; }
+  .vital-chip {
+    background: #2a1f1a; border: 1px solid #5a3a2a; border-radius: 6px;
+    padding: 3px 9px; font-size: 12px; color: #e8c8a8; white-space: nowrap;
+  }
+  .sheet-row { display: flex; gap: 8px; align-items: flex-start; font-size: 14px; line-height: 1.45; }
+  .sheet-icon { flex-shrink: 0; width: 20px; text-align: center; font-size: 15px; }
+  .sheet-text { min-width: 0; overflow-wrap: anywhere; color: var(--text-primary); }
+  .sheet-text b { color: var(--text-secondary); font-weight: 600; }
   .msg.dice {
     align-self: center; background: #2a1f1a; border: 1px solid #5a3a2a;
     color: #e8c8a8; font-family: 'SF Mono', Menlo, monospace;
@@ -1017,13 +1046,109 @@ function renderStatus() {
 
 /* CHAT */
 function scrollBottom() { chatEl.scrollTop = chatEl.scrollHeight; }
+
+const SHEET_OPEN = '[[ЛИСТ]]';
+const SHEET_CLOSE = '[[/ЛИСТ]]';
+
+/* Текст без меток: они служебные и в рассказе не нужны. */
+function appendMasterText(parent, chunk) {
+  const clean = chunk.replace(/\[\[\/?ЛИСТ\]\]/g, '').replace(/^\n+|\n+$/g, '');
+  if (!clean) return;
+  const part = document.createElement('div');
+  part.className = 'master-text';
+  part.textContent = clean;
+  parent.appendChild(part);
+}
+
+function sheetChip(className, head, tail) {
+  const chip = document.createElement('span');
+  chip.className = className;
+  if (head) {
+    const b = document.createElement('b');
+    b.textContent = head;
+    chip.appendChild(b);
+    chip.appendChild(document.createTextNode(tail ? ' ' + tail : ''));
+  } else {
+    chip.textContent = tail;
+  }
+  return chip;
+}
+
+/* Блок [[ЛИСТ]] превращается в карточку: значок строки задаёт её вид. */
+function sheetCard(body) {
+  const card = document.createElement('div');
+  card.className = 'sheet-card';
+  for (const line of String(body).split('\n').map(s => s.trim()).filter(Boolean)) {
+    const match = line.match(/^(\S{1,6})\s+(.*)$/u);
+    const icon = match && /\p{Extended_Pictographic}/u.test(match[1]) ? match[1] : '';
+    const rest = icon ? match[2] : line;
+    const key = icon.replace(/\uFE0F/g, '');
+    if (key === '👤') {
+      const head = document.createElement('div');
+      head.className = 'sheet-head';
+      head.textContent = rest;
+      card.appendChild(head);
+      continue;
+    }
+    if (key === '📊' || key === '❤') {
+      const box = document.createElement('div');
+      box.className = 'sheet-chips';
+      for (const part of rest.split('·').map(s => s.trim()).filter(Boolean)) {
+        const stat = part.match(/^(\S+)\s+(\S.*)$/u);
+        box.appendChild(key === '📊'
+          ? sheetChip('stat-chip', stat ? stat[1] : '', stat ? stat[2] : part)
+          : sheetChip('vital-chip', '', part));
+      }
+      card.appendChild(box);
+      continue;
+    }
+    const row = document.createElement('div');
+    row.className = 'sheet-row';
+    if (icon) {
+      const iconEl = document.createElement('span');
+      iconEl.className = 'sheet-icon';
+      iconEl.textContent = icon;
+      row.appendChild(iconEl);
+    }
+    const text = document.createElement('span');
+    text.className = 'sheet-text';
+    const split = rest.indexOf(': ');
+    if (split > 0 && split < 24) {
+      const label = document.createElement('b');
+      label.textContent = rest.slice(0, split + 1);
+      text.appendChild(label);
+      text.appendChild(document.createTextNode(' ' + rest.slice(split + 2)));
+    } else {
+      text.textContent = rest;
+    }
+    row.appendChild(text);
+    card.appendChild(row);
+  }
+  return card;
+}
+
+function masterContent(text) {
+  const frag = document.createDocumentFragment();
+  const raw = String(text);
+  let cursor = 0;
+  for (;;) {
+    const start = raw.indexOf(SHEET_OPEN, cursor);
+    if (start === -1) break;
+    const end = raw.indexOf(SHEET_CLOSE, start + SHEET_OPEN.length);
+    if (end === -1) break;
+    appendMasterText(frag, raw.slice(cursor, start));
+    frag.appendChild(sheetCard(raw.slice(start + SHEET_OPEN.length, end)));
+    cursor = end + SHEET_CLOSE.length;
+  }
+  appendMasterText(frag, raw.slice(cursor));
+  return frag;
+}
+
 function addMsg(role, text) {
   const d = document.createElement('div');
   d.className = 'msg ' + role;
   if (role === 'master') {
-    const textSpan = document.createElement('span');
-    textSpan.textContent = text;
-    d.appendChild(textSpan);
+    d.appendChild(masterContent(text));
     if (tts.available) {
       const btn = document.createElement('button');
       btn.className = 'speak-btn';
@@ -1086,7 +1211,7 @@ async function callAI(pending) {
       const {done, value} = await reader.read();
       if (done) break;
       full += dec.decode(value, {stream: true});
-      md.textContent = full;
+      md.textContent = full.replace(/\[\[\/?ЛИСТ\]\]/g, '');
       scrollBottom();
     }
     full += dec.decode();
