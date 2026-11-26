@@ -25,7 +25,7 @@ from openai import OpenAI
 from token_usage import TokenUsage, state_turn_id
 
 BASE_DIR = Path(__file__).resolve().parent
-APP_REVISION = "2026-11-25.18"
+APP_REVISION = "2026-11-25.19"
 QWEN_SUMMARY_LIMIT = 480
 QWEN_STATE_LIMIT = 1100
 QWEN_STATE_SETUP_LIMIT = 2200
@@ -102,13 +102,24 @@ SUMMARY_MODEL = _model_id((os.getenv("SUMMARY_MODEL") or "").strip() or MODEL)
 FREQ_PENALTY = float(os.getenv("OPENAI_FREQ_PENALTY", "0.15"))
 PRES_PENALTY = float(os.getenv("OPENAI_PRES_PENALTY", "0.0"))
 NARRATION_MAX_TOKENS = max(256, int(os.getenv("NARRATION_MAX_TOKENS", "900")))
-# Необязательно: "none" или "low" — если модель тратит вывод на скрытые рассуждения.
+# Создание героя требует больше места: лист, умения и открывающая сцена.
+NARRATION_SETUP_TOKENS = max(NARRATION_MAX_TOKENS, int(os.getenv("NARRATION_SETUP_TOKENS", "1600")))
+# Повтор при пустом ответе: лимит выше, рассуждения выключены.
+NARRATION_RETRY_TOKENS = max(NARRATION_SETUP_TOKENS, int(os.getenv("NARRATION_RETRY_TOKENS", "2000")))
+NARRATION_RETRY_EFFORT = (os.getenv("NARRATION_RETRY_EFFORT") or "none").strip()
+# Необязательно: "none", "minimal" или "low" — если модель тратит вывод на рассуждения.
 CHAT_REASONING_EFFORT = (os.getenv("CHAT_REASONING_EFFORT") or "").strip()
+
+# Что выяснилось про параметр рассуждений у текущей модели (память процесса):
+#   None — ещё не проверяли, "" — провайдер параметр не принимает,
+#   иначе — режим, который сработал. Так повтор не оплачивается каждый ход.
+_REASONING_STATE = {"fix": None}
 
 print(
     f"[boot] app_revision={APP_REVISION} | env={_ENV_FILE.name if _ENV_FILE else 'нет (только переменные окружения)'} | "
     f"provider={PROVIDER} | model={MODEL} | base_url={BASE_URL or 'https://api.openai.com/v1'} | "
-    f"timeout={LLM_TIMEOUT:g}s | narration_max_tokens={NARRATION_MAX_TOKENS}",
+    f"timeout={LLM_TIMEOUT:g}s | narration_max_tokens={NARRATION_MAX_TOKENS} | "
+    f"narration_setup_tokens={NARRATION_SETUP_TOKENS}",
     flush=True,
 )
 if BASE_URL and ("127.0.0.1" in BASE_URL or "localhost" in BASE_URL):
@@ -224,22 +235,25 @@ def _qwen_service_options(model, limit):
     return {"extra_body": {"reasoning_effort": "none", "max_completion_tokens": limit}}
 
 
-def _start_stream(messages):
-    """Поддерживает провайдеры, отклоняющие штрафы, лимит вывода или потоковый учёт токенов."""
+def _start_stream(messages, *, max_tokens=None, reasoning_effort=None, diag=None):
+    """Поддерживает провайдеры, отклоняющие штрафы, лимит вывода, рассуждения
+    или потоковый учёт токенов."""
+    limit = NARRATION_MAX_TOKENS if max_tokens is None else max_tokens
     options = dict(model=MODEL, messages=messages, stream=True,
                    stream_options={"include_usage": True},
-                   max_tokens=NARRATION_MAX_TOKENS)
+                   max_tokens=limit)
     if _is_yandex_qwen(MODEL):
         # Use Qwen's non-thinking sampling profile for narration.
         options.pop("max_tokens", None)
         options.update(temperature=0.7, top_p=0.8,
                        extra_body={"reasoning_effort": "none",
-                                   "max_completion_tokens": NARRATION_MAX_TOKENS})
+                                   "max_completion_tokens": limit})
     else:
         options.update(temperature=0.8, frequency_penalty=FREQ_PENALTY,
                        presence_penalty=PRES_PENALTY)
-        if CHAT_REASONING_EFFORT:
-            options["extra_body"] = {"reasoning_effort": CHAT_REASONING_EFFORT}
+        effort = CHAT_REASONING_EFFORT if reasoning_effort is None else reasoning_effort
+        if effort:
+            options["extra_body"] = {"reasoning_effort": effort}
     while True:
         try:
             return client.chat.completions.create(**options)
@@ -256,6 +270,8 @@ def _start_stream(messages):
             elif "extra_body" in options and any(
                     word in detail for word in ("reasoning_effort", "extra_body")):
                 del options["extra_body"]
+                if diag is not None:
+                    diag["reasoning_rejected"] = True
             elif "frequency_penalty" in options and any(word in detail for word in PENALTY_REJECT):
                 del options["frequency_penalty"]
                 del options["presence_penalty"]
@@ -459,7 +475,7 @@ CHARACTER_CREATION_RULES = """
 # непосредственно перед ответом, поэтому оно и задаёт длину.
 LENGTH_NOTE = """
 [ФОРМАТ ОТВЕТА — ГЛАВНОЕ ПРАВИЛО ЭТОГО ХОДА]
-Пиши 2 полных абзаца по 4–7 предложений (примерно 900–1400 знаков). Первый: что произошло, как отреагировали NPC и мир, одна-две конкретные детали. Второй: последствия для героя, изменение обстановки и зацепка к следующему шагу. Важная сцена — до 4 абзацев, кульминация — до 6. Ответ в одну-две строки считается ошибкой: если сцена не даёт материала, добавь реакцию мира, деталь окружения и зацепку, но не выдумывай новый обязательный сюжет. Проверку по-прежнему заканчивай запросом броска и без итога. Строку награды (+50 XP — квест «Название») оставляй отдельной последней строкой, а не внутри абзаца.
+Пиши 2 полных абзаца по 4–7 предложений (примерно 900–1400 знаков). Первый: что произошло, как отреагировали NPC и мир, одна-две конкретные детали. Второй: последствия для героя, изменение обстановки и зацепка к следующему шагу. Важная сцена — до 4 абзацев, кульминация — до 6. Ответ в одну-две строки считается ошибкой: если сцена не даёт материала, добавь реакцию мира, деталь окружения и зацепку, но не выдумывай новый обязательный сюжет. Проверку по-прежнему заканчивай запросом броска и без итога. Строку награды (+50 XP — квест «Название») оставляй отдельной последней строкой, а не внутри абзаца. При создании персонажа сначала объяви лист, затем дай первый абзац сцены в этом же формате.
 """
 
 
@@ -1283,6 +1299,8 @@ def api_health():
             "state_setup": QWEN_STATE_SETUP_LIMIT if _is_yandex_qwen(EXTRACT_MODEL) else None,
         },
         "narration_max_tokens": NARRATION_MAX_TOKENS,
+        "narration_setup_tokens": NARRATION_SETUP_TOKENS,
+        "narration_retry_tokens": NARRATION_RETRY_TOKENS,
         "recent_history_chars": RECENT_HISTORY_CHARS,
         "summary_input_chars": SUMMARY_INPUT_CHARS,
         "summary_max_tokens": SUMMARY_MAX_TOKENS,
@@ -1309,6 +1327,7 @@ def api_diag():
         "model": MODEL,
         "extract_model": EXTRACT_MODEL,
         "summary_model": SUMMARY_MODEL,
+        "narration_reasoning": _REASONING_STATE["fix"] if _REASONING_STATE["fix"] is not None else CHAT_REASONING_EFFORT,
         "base_url": BASE_URL or "https://api.openai.com/v1",
         "key_set": bool(API_KEY),
         "env_file": _ENV_FILE.name if _ENV_FILE else None,
@@ -1377,9 +1396,11 @@ def api_chat():
         return jsonify({"error": "empty messages"}), 400
     if not isinstance(game_state, dict):
         game_state = DEFAULT_STATE
+    setup_turn = bool(game_state.get("character_setup_pending")
+                      or not (game_state.get("race") and game_state.get("class")))
     if messages[0].get("role") != "system":
         prompt = SYSTEM_PROMPT
-        if game_state.get("character_setup_pending") or not (game_state.get("race") and game_state.get("class")):
+        if setup_turn:
             prompt += CHARACTER_CREATION_RULES
         messages = [{"role": "system", "content": prompt}] + messages
     state_context = {key: game_state[key] for key in STATE_FIELDS if key in game_state}
@@ -1430,6 +1451,7 @@ def api_chat():
     messages = _messages_with_memory(messages, _header_token("X-Session-Id", 64))
 
     visitor_id = request.cookies.get(PRESENCE_COOKIE, "")
+    narration_limit = NARRATION_SETUP_TOKENS if setup_turn else NARRATION_MAX_TOKENS
 
     def generate():
         if not _check_presence(visitor_id, start_chat=True)["admitted"]:
@@ -1443,48 +1465,106 @@ def api_chat():
             return
         slot_at = perf_counter()
         first_text_at = None
-        stream = None
-        usage = None
-        model = MODEL
+        last_usage = None
+        attempts = 0
+        emitted = False
         try:
-            try:
-                stream = _start_stream(messages)
-            except Exception as e:
-                app.logger.exception("Модель недоступна")
-                hint = _error_hint(e)
-                yield f"\n[Ошибка API: {_short_error(e)}" + (f" {hint}" if hint else "") + "]"
-                return
-            for chunk in stream:
-                if getattr(chunk, "usage", None) is not None:
-                    usage = chunk.usage
-                    model = getattr(chunk, "model", None) or model
-                if not chunk.choices:
-                    continue
-                delta = getattr(chunk.choices[0], "delta", None)
-                text = getattr(delta, "content", None) if delta else None
-                if text:
-                    if first_text_at is None:
-                        first_text_at = perf_counter()
-                    yield text
-        except Exception as e:
-            app.logger.exception("Стрим прервался")
-            hint = _error_hint(e)
-            yield f"\n[Ошибка API: {_short_error(e)}" + (f" {hint}" if hint else "") + "]"
-        finally:
-            try:
-                if stream is not None:
-                    stream.close()
-            finally:
-                LLM_SEM.release()
-                _finish_chat_presence(visitor_id)
-                TOKEN_USAGE.record(turn_id, "chat", model, usage)
+            learned = _REASONING_STATE["fix"]
+            variants = [
+                (narration_limit, CHAT_REASONING_EFFORT if learned is None else learned),
+                # Повтор: лимит выше, рассуждения выключены. Провайдер может
+                # отклонить режим — тогда останется хотя бы увеличенный лимит.
+                (NARRATION_RETRY_TOKENS, NARRATION_RETRY_EFFORT),
+            ]
+            for limit, effort in variants:
+                attempts += 1
+                diag = {}
+                stream = None
+                usage = None
+                model = MODEL
+                content_chars = 0
+                reasoning_chars = 0
+                finish = None
+                try:
+                    try:
+                        stream = _start_stream(messages, max_tokens=limit,
+                                               reasoning_effort=effort, diag=diag)
+                    except Exception as e:
+                        app.logger.exception("Модель недоступна")
+                        hint = _error_hint(e)
+                        yield f"\n[Ошибка API: {_short_error(e)}" + (f" {hint}" if hint else "") + "]"
+                        return
+                    for chunk in stream:
+                        if getattr(chunk, "usage", None) is not None:
+                            usage = chunk.usage
+                            model = getattr(chunk, "model", None) or model
+                        if not chunk.choices:
+                            continue
+                        choice = chunk.choices[0]
+                        if getattr(choice, "finish_reason", None):
+                            finish = choice.finish_reason
+                        delta = getattr(choice, "delta", None)
+                        text = getattr(delta, "content", None) if delta is not None else None
+                        if not text:
+                            # Некоторые прокси игнорируют stream=true и присылают
+                            # готовый ответ целиком, без дельт.
+                            message = getattr(choice, "message", None)
+                            text = getattr(message, "content", None) if message is not None else None
+                        if text:
+                            content_chars += len(text)
+                            if first_text_at is None:
+                                first_text_at = perf_counter()
+                            emitted = True
+                            yield text
+                        elif delta is not None:
+                            reasoning = (getattr(delta, "reasoning_content", None)
+                                         or getattr(delta, "reasoning", None))
+                            if reasoning:
+                                reasoning_chars += len(reasoning)
+                except Exception as e:
+                    app.logger.exception("Стрим прервался")
+                    if emitted:
+                        hint = _error_hint(e)
+                        yield f"\n[Ошибка API: {_short_error(e)}" + (f" {hint}" if hint else "") + "]"
+                        return
+                    # До первого текста ничего не отправлено — повтор безопасен.
+                finally:
+                    try:
+                        if stream is not None:
+                            stream.close()
+                    finally:
+                        if usage is not None:
+                            last_usage = usage
+                        TOKEN_USAGE.record(turn_id, "chat", model, usage)
+                if diag.get("reasoning_rejected"):
+                    _REASONING_STATE["fix"] = ""
+                if emitted:
+                    if not diag.get("reasoning_rejected") and attempts > 1:
+                        # Запоминаем рабочие параметры, чтобы не платить за повтор каждый ход.
+                        _REASONING_STATE["fix"] = effort or ""
+                    break
                 print(
-                    f"[chat] queue_ms={round((slot_at - queued_at) * 1000)} "
-                    f"first_text_ms={round((first_text_at - started_at) * 1000) if first_text_at is not None else '-'} "
-                    f"response_ms={round((perf_counter() - started_at) * 1000)} "
-                    f"output_tokens={getattr(usage, 'completion_tokens', '-')}",
+                    f"[chat] пустой ответ: попытка={attempts} limit={limit} "
+                    f"effort={effort or '—'} finish={finish} content_chars={content_chars} "
+                    f"reasoning_chars={reasoning_chars} "
+                    f"reasoning_tokens={getattr(getattr(usage, 'completion_tokens_details', None), 'reasoning_tokens', None)}",
                     flush=True,
                 )
+            if not emitted:
+                yield ("\n[Ошибка API: модель не вернула текст. Обычно это значит, что "
+                       "весь лимит вывода ушёл на скрытые рассуждения. Отправьте сообщение "
+                       "ещё раз; если повторяется — задайте в Railway CHAT_REASONING_EFFORT=none "
+                       "и перезапустите сервис.]")
+        finally:
+            LLM_SEM.release()
+            _finish_chat_presence(visitor_id)
+            print(
+                f"[chat] queue_ms={round((slot_at - queued_at) * 1000)} "
+                f"first_text_ms={round((first_text_at - started_at) * 1000) if first_text_at is not None else '-'} "
+                f"response_ms={round((perf_counter() - started_at) * 1000)} "
+                f"attempts={attempts} output_tokens={getattr(last_usage, 'completion_tokens', '-')}",
+                flush=True,
+            )
 
     return Response(
         stream_with_context(generate()),
