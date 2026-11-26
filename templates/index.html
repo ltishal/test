@@ -1621,6 +1621,11 @@ async function doSheet() {
            ${Array.isArray(q.rewards.items) && q.rewards.items.length ? ' · ' + q.rewards.items.map(esc).join(', ') : ''}
          </div>`
       : '';
+    const rewardStatusText = {
+      paid: 'Награда выплачена.',
+      denied: 'Условие не выполнено. Выплаты нет.',
+      pending: 'Условие ещё не подтверждено.',
+    }[q.reward_status] || 'Условие ещё не подтверждено.';
     return `<div class="ability-card" style="border-color:${statusColor};${isCompleted ? 'opacity:0.55;' : ''}">
       <div class="ability-header">
         <span class="ability-name" style="color:${statusColor}">${statusIcon} ${t.icon} ${esc(q.name || '—')}</span>
@@ -1629,11 +1634,7 @@ async function doSheet() {
       <div>${stages || '<div style="font-size:12px;color:var(--text-secondary);font-style:italic">— нет этапов —</div>'}</div>
       ${rewards}
       ${q.reward_condition ? `<div style="font-size:12px;margin-top:6px">
-        Выплата при условии: ${esc(q.reward_condition)}. ${{
-          paid: 'Награда выплачена.',
-          denied: 'Условие не выполнено. Выплаты нет.',
-          pending: 'Условие ещё не подтверждено.',
-        }[q.reward_status] || 'Условие ещё не подтверждено.'}
+        Выплата при условии: ${esc(q.reward_condition)}. ${rewardStatusText}
       </div>` : ''}
     </div>`;
   }
