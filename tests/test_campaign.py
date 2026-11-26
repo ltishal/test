@@ -1,7 +1,10 @@
 import json
 import unittest
 
-from campaign import active_check, apply_ability_event, merge_facts, merge_scene, pending_check, roll_result, rules_result
+from campaign import (
+    active_check, apply_ability_event, merge_facts, merge_scene, normalize_ability,
+    pending_check, roll_result, rules_result,
+)
 
 
 class CampaignTest(unittest.TestCase):
@@ -44,6 +47,20 @@ class CampaignTest(unittest.TestCase):
         self.assertFalse(apply_ability_event(spent, "Защитная стойка")[1])
         restored, _ = apply_ability_event(spent, rest="short_rest")
         self.assertEqual(restored, [{**stance, "uses_left": 2}, passive])
+
+    def test_legacy_unlimited_ability_has_no_charge_counter(self):
+        legacy = {
+            "name": "**Мистический заряд 1d10&#x20;**",
+            "uses_max": -1,
+            "uses_left": -1,
+            "recharge": "short_rest",
+        }
+        normalized = {"name": "Мистический заряд 1d10", "recharge": "unlimited"}
+        self.assertEqual(normalize_ability(legacy), normalized)
+        self.assertEqual(apply_ability_event([legacy], "Мистический заряд 1d10"), ([normalized], True))
+        self.assertEqual(apply_ability_event([normalized], rest="short_rest")[0], [normalized])
+        passive = {**legacy, "name": "Сопротивление", "recharge": "passive"}
+        self.assertEqual(normalize_ability(passive), {"name": "Сопротивление", "recharge": "passive"})
 
     def test_scene_identity_and_transfer_of_a_clue(self):
         scene = merge_scene({}, {"location": "Мельница", "participants": ["Рагар", "Гонец"]})

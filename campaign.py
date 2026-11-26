@@ -2,6 +2,7 @@
 
 import re
 from hashlib import sha256
+from html import unescape
 from uuid import uuid4
 
 ROLL_COMMAND = re.compile(r"/roll\s+((?:\d*)d\d+(?:k[hl]\d+)?(?:[+-]\d+)?)", re.I)
@@ -227,30 +228,67 @@ def facts_context(facts, query):
     )))[:12]
 
 
+def clean_ability_name(name):
+    if not isinstance(name, str):
+        return ""
+    return " ".join(unescape(name).replace("**", "").split())
+
+
 def ability_key(name):
-    return _text(name, 100).casefold()
+    return clean_ability_name(name).casefold()
+
+
+def _negative_count(value):
+    return (isinstance(value, int) and value < 0
+            or isinstance(value, str) and re.fullmatch(r"-[1-9]\d*", value.strip()) is not None)
+
+
+def normalize_ability(entry):
+    if not isinstance(entry, dict):
+        return None
+    name = clean_ability_name(entry.get("name"))
+    if not name:
+        return None
+    result = {**entry, "name": name}
+    recharge = result.get("recharge")
+    maximum = result.get("uses_max")
+    if recharge != "passive" and (
+        recharge in ("unlimited", "at_will") or _negative_count(maximum)
+        or (maximum is None and _negative_count(result.get("uses_left")))
+    ):
+        result["recharge"] = "unlimited"
+    if result.get("recharge") in ("passive", "unlimited"):
+        result.pop("uses_max", None)
+        result.pop("uses_left", None)
+    return result
+
+
+def normalize_abilities(entries):
+    if not isinstance(entries, list):
+        return []
+    return [ability for entry in entries if (ability := normalize_ability(entry))]
 
 
 def apply_ability_event(abilities, name="", rest=""):
-    """Return updated charges and whether a requested use was available."""
-    entries = [dict(entry) if isinstance(entry, dict) else entry for entry in abilities or []]
+    """Return updated charges and whether the requested ability could be used."""
+    entries = normalize_abilities(abilities)
     expected = ability_key(name)
-    spent = False
+    used = False
     for entry in entries:
-        if not isinstance(entry, dict):
+        recharge = entry.get("recharge")
+        matches = bool(expected and ability_key(entry["name"]) == expected)
+        if recharge == "unlimited":
+            used = used or matches
             continue
         maximum = entry.get("uses_max")
         if type(maximum) is not int or maximum <= 0:
             continue
-        recharge = entry.get("recharge")
-        if recharge == "passive":
-            continue
         if (recharge == "short_rest" and rest in {"short_rest", "long_rest"}
                 or recharge == "long_rest" and rest == "long_rest"):
             entry["uses_left"] = maximum
-        if expected and ability_key(entry.get("name")) == expected:
+        if matches and not used:
             available = entry.get("uses_left", maximum)
-            if not spent and type(available) is int and available > 0:
+            if type(available) is int and available > 0:
                 entry["uses_left"] = min(maximum, available) - 1
-                spent = True
-    return entries, spent
+                used = True
+    return entries, used

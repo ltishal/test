@@ -25,13 +25,13 @@ from openai import OpenAI
 
 from campaign import (
     active_check, apply_ability_event, facts_context, formula_key, merge_facts, merge_scene, notes_context,
-    pending_check, roll_result, rules_result,
+    normalize_abilities, normalize_ability, pending_check, roll_result, rules_result,
 )
 
 from token_usage import TokenUsage, state_turn_id
 
 BASE_DIR = Path(__file__).resolve().parent
-APP_REVISION = "2026-11-26.1"
+APP_REVISION = "2026-11-26.2"
 QWEN_SUMMARY_LIMIT = 480
 QWEN_STATE_LIMIT = 1100
 QWEN_STATE_SETUP_LIMIT = 2200
@@ -549,7 +549,7 @@ STATE_EXTRACT_PROMPT = """
 
 Обнови лист RPG по последнему ходу. Верни строго JSON только изменённых полей, {} при отсутствии изменений.
 Меняй состояние только по новому результату в последней реплике мастера. Предыдущие реплики и пересказ старых событий служат контекстом. Лист уже учитывает прошлые удары, лечение, покупки и расходы. Изменяй кошелёк и инвентарь лишь при реальном новом обмене, расходе или находке. Пересказ, проверка числа, предложения и суммы до прошлого обмена ничего не меняют. Для существующего героя верни hp_delta (отрицательный урон или положительное лечение) только за новый результат, и hp_event: короткая дословная фраза из последнего ответа, где этот урон или лечение произошли, а не где обсуждается итоговое здоровье. На запросе броска, сверке или пересказе не возвращай hp_delta. При создании используй hp и max_hp. Для изменений инвентаря или монет у существующего героя верни resource_events: {"inventory":"дословная фраза нового получения, траты или передачи", "wallet":"дословная фраза новой оплаты"}. Укажи только затронутые группы. Цифры в пересказе или сверке не являются событиями. xp, xp_next, level, level_pending, xp_event_ids считает сервер.
-Имя, раса, класс и предыстория меняются только по событию. Поля: name, race, class, background, hp, max_hp, gold, silver, copper, stats {str,dex,con,int,wis,cha}. HP не выше max_hp. Базовые характеристики, владения, навыки и умения назначай при создании, беря их из блока [[ЛИСТ]]: строка «📊» — характеристики, «❤️» — hp, уровень, опыт и кошелёк, «🛡» — владения, «🗣» — языки, «🎯» — навыки с суммарным бонусом, «⚡» — активные умения с uses_max, uses_left и recharge (short_rest, long_rest или day), «🌀» — пассивные и постоянные эффекты с recharge passive и без uses_max, «🎒» — инвентарь. Значки и метки [[ЛИСТ]] в лист не переноси. Название умения бери из блока как есть, включая числовой эффект. Инвентарь, кошелёк и характеристики из блока переноси сразу, в том же ходе. Навык {name,bonus,source}; умение {name,description,uses_max,uses_left,recharge}. Трать применения по событию и восстанавливай по отдыху. Для Дыхания дракона спиши одно применение после разрешения урона, а не пока мастер ждёт бросок. Сохраняй полное описание эффекта при изменении только зарядов.
+Имя, раса, класс и предыстория меняются только по событию. Поля: name, race, class, background, hp, max_hp, gold, silver, copper, stats {str,dex,con,int,wis,cha}. HP не выше max_hp. Базовые характеристики, владения, навыки и умения назначай при создании, беря их из блока [[ЛИСТ]]: строка «📊» — характеристики, «❤️» — hp, уровень, опыт и кошелёк, «🛡» — владения, «🗣» — языки, «🎯» — навыки с суммарным бонусом, «⚡» — активные умения с uses_max, uses_left и recharge (short_rest, long_rest или day), «🌀» — пассивные и постоянные эффекты с recharge passive и без uses_max, «🎒» — инвентарь. Значки и метки [[ЛИСТ]] в лист не переноси. Название умения бери из блока как есть, включая числовой эффект. Инвентарь, кошелёк и характеристики из блока переноси сразу, в том же ходе. Навык {name,bonus,source}; умение {name,description,uses_max,uses_left,recharge}. Трать применения по событию и восстанавливай по отдыху. Для Дыхания дракона спиши одно применение после разрешения урона, а не пока мастер ждёт бросок. Сохраняй полное описание эффекта при изменении только зарядов. Активное умение «без ограничений» передавай с recharge: "unlimited", без uses_max и uses_left. Пассивный эффект передавай с recharge: "passive". Не используй отрицательные заряды, Markdown и HTML-сущности в названии.
 Изменённую запись коллекции возвращай целиком с прежним id или именем. inventory содержит только добавленные или изменённые вещи. Для удаления верни inventory_remove: [{"name":"точное имя из листа","quantity":1}]. Удаляй за фактический расход, передачу или потерю. Для замены старого названия новым явно удали старую запись. Количество у изменённого предмета указывай итоговое. notes — содержание документов, писем, слухов и записей. Полученный физический документ также добавь в inventory, при вручении удали его из inventory. Заметка {id,type,title,content,source,date,unread}; type: note, letter, document, notification, rumor или journal.
 Квест {id,name,type,status,chain,chain_order,stages,current_stage,rewards,giver,location}; stages — объекты {text,done}; rewards — объект {xp,gold,silver,copper,items,reputation}. Записывай окончательно предложенные условия со статусом offered, принятые — active. Сохраняй id, название, этапы и награду. Отмечай каждый фактически выполненный этап по отдельности. Закрывай квест после сдачи всех обязательных этапов. Если квест официально закрыли с неполным результатом, верни failed и сохрани невыполненные пункты. Исправляй явно отменённое закрытие с прежним id.
 Временные поля по сцене: conditions, position, cover, weapon_in_hand, restrained, dc_modifier, dc_modifier_reasons. Отрази уже совершённое перемещение даже перед запросом броска. При смене сцены обнови cover: "нет", если герой покинул прежнее укрытие без нового. При пустых руках верни weapon_in_hand: "". Если условия прошли, верни пустой список; при отсутствии помех — 0 и []. Связи {name,attitude,note}; faction_clocks {name,progress,max,goal}. При обучении или событии в мире обновляй skills и abilities даже после создания героя.
@@ -1052,7 +1052,7 @@ def _apply_level_upgrade(state, upgrade, next_level):
         return False
 
     stat = upgrade.get("stat")
-    ability = upgrade.get("ability")
+    ability = normalize_ability(upgrade.get("ability"))
     if not isinstance(stat, str) or stat not in DEFAULT_STATE["stats"] or not isinstance(ability, dict):
         return False
     if not isinstance(ability.get("name"), str) or not ability["name"].strip():
@@ -1160,6 +1160,7 @@ def extract_state(messages, current_state, turn_id=None, result=None):
     current = dict(DEFAULT_STATE)
     if isinstance(current_state, dict):
         current.update(current_state)
+    current["abilities"] = normalize_abilities(current.get("abilities"))
     next_upgrade_level = _next_upgrade_level(current)
     last_index = len(messages) - 1
     last_reply = messages[-1] if messages and messages[-1].get("role") == "assistant" else None
@@ -1299,6 +1300,8 @@ def extract_state(messages, current_state, turn_id=None, result=None):
             next_check["expr"] = f"1d10+{current.get('level', 1)}"
     elif resolved_check.get("kind") == "heal" and resolved_check.get("ability") == "Второе дыхание":
         used_ability = "" if resolved_check.get("charge_spent") else "Второе дыхание"
+    if "abilities" in new_state:
+        new_state["abilities"] = normalize_abilities(new_state["abilities"])
     if not new_character:
         rest = rest if rest in ("short_rest", "long_rest") else ""
         used_ability = used_ability if isinstance(used_ability, str) else ""
@@ -1687,8 +1690,8 @@ def api_chat():
     quest_context = _quest_context(game_state.get("quests"), game_state.get("quest_xp_awards") or [])
     if quest_context:
         state_context["quests"] = quest_context
-    abilities = game_state.get("abilities")
-    if isinstance(abilities, list):
+    abilities = normalize_abilities(game_state.get("abilities"))
+    if abilities:
         known_abilities = []
         descriptions_left = 720
         for ability in abilities:
