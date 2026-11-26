@@ -3,7 +3,8 @@ import unittest
 
 from campaign import (
     active_check, apply_ability_event, initial_identity, merge_facts, merge_scene, normalize_ability,
-    pending_check, roll_result, rules_result, update_agenda, wait_plan,
+    advance_clock, check_instructions_in_card, close_overdue_events, facts_context, pending_check,
+    record_npc_actions, roll_result, rules_result, synchronize_clock, update_agenda, wait_plan,
 )
 
 
@@ -95,6 +96,74 @@ class CampaignTest(unittest.TestCase):
         self.assertEqual(len(state["agenda"]), 1)
         with self.assertRaises(ValueError):
             wait_plan(state, "/wait next")
+
+    def test_elapsed_time_is_charged_once_per_check(self):
+        start = 17 * 60 + 30
+        announcement = "Прошло десять минут. Сделай проверку Расследования, DC 12. /roll 1d20+3"
+        elapsed = {"minutes": 10, "evidence": "Прошло десять минут"}
+        current = advance_clock(start, announcement, elapsed, None, None, False,
+                                lambda phrase: phrase in announcement)
+        self.assertEqual(current, 17 * 60 + 40)
+        result = "Вы потратили десять минут у конторки, теперь 17:50."
+        check = {"clock_spent": 10}
+        self.assertEqual(advance_clock(current, result, None, None, check, True, lambda _: True), current)
+        result = "На обратный путь ушло ещё пять минут."
+        elapsed = {"minutes": 5, "additional": True, "evidence": result}
+        self.assertEqual(advance_clock(current, result, elapsed, None, check, True,
+                                       lambda phrase: phrase in result), current + 5)
+
+    def test_explicit_arrival_and_wait_clock(self):
+        reply = "Обещанная встреча в 22:00. К 21:34 Лира снова рядом с Марой."
+        self.assertEqual(advance_clock(1284, reply, None, None, None, False, lambda _: False), 1294)
+        self.assertEqual(advance_clock(1430, "Сейчас 00:10.", None, None, None, False, lambda _: False), 1450)
+        self.assertEqual(advance_clock(1284, "Они назначили время 22:00.",
+                                       None, None, None, False, lambda _: False), 1284)
+        reply = "Вы ждали с 05:34. Сейчас День 2, 05:34, а встреча в 07:00."
+        self.assertEqual(synchronize_clock(reply, 1800),
+                         "Вы ждали с 05:34. Сейчас День 2, 06:00, а встреча в 07:00.")
+
+    def test_undated_errand_has_a_check_in_and_can_get_a_late_outcome(self):
+        evidence = "Савел уходит искать лекаря."
+        patch = {"id": "savel-healer", "title": "Известия от Савела", "location": "Сарай",
+                 "check_in": True, "evidence": evidence}
+        state = {"world_minute": 1101, "agenda": update_agenda({}, [patch], [], 1101, lambda _: True)}
+        event = state["agenda"][0]
+        self.assertTrue(event["check_in"])
+        self.assertEqual(wait_plan(state, "/wait next")["until"], 1131)
+        close_overdue_events(state["agenda"], 1131)
+        self.assertTrue(event["no_report"])
+        self.assertIn("Сарай", event["outcome"])
+        late = {"id": patch["id"], "outcome": "Савел привёл лекаря", "evidence": "Савел привёл лекаря."}
+        events = update_agenda(state, [patch], [late], 1140, lambda _: True)
+        self.assertEqual(len(events), 1)
+        self.assertNotIn("no_report", events[0])
+        self.assertEqual(events[0]["outcome"], late["outcome"])
+
+    def test_npc_statements_cannot_replace_confirmed_actions(self):
+        quote = "Савел передаёт верёвку и уходит за помощью."
+        patch = {"id": "savel-search", "actor": "Савел", "evidence": quote}
+        facts = record_npc_actions([], [patch, {**patch, "id": "invalid", "evidence": "Савел вернулся."}],
+                                   {"location": "Волнорез"}, 1101, lambda text: text == quote)
+        self.assertEqual(len(facts), 1)
+        action = facts[0]
+        facts = merge_facts(facts, [
+            {"id": action["id"], "subject": "Савел", "detail": "Никуда не уходил.", "status": "reported"},
+            {"id": "savel-statement", "subject": "Савел", "detail": "Говорит, что не уходил.", "status": "reported"},
+        ])
+        self.assertEqual(facts_context(facts, "Где искать Савела?")[0], action)
+        self.assertEqual((action["detail"], action["location"], action["minute"]), (quote, "Волнорез", 1101))
+
+    def test_duplicate_formula_keeps_a_structured_check(self):
+        reply = ("Ловкость рук, DC 15. Команда: /roll 1d20+5."
+                 "Фонарь скользит. Ловкость рук, DC 15. **Команда: /roll 1d20+5.**")
+        check = pending_check(reply, {"title": "Ловкость рук"})
+        self.assertEqual(check["dc"], 15)
+        rendered = check_instructions_in_card(reply, check)
+        self.assertIn("Фонарь скользит.", rendered)
+        self.assertNotIn("/roll", rendered)
+        self.assertNotIn("**", rendered)
+        self.assertIsNone(pending_check(reply.replace("DC 15. **", "DC 12. **")))
+        self.assertIsNone(pending_check(reply.replace("/roll 1d20+5.**", "/roll 1d20+2.**")))
 
     def test_scene_identity_and_transfer_of_a_clue(self):
         scene = merge_scene({}, {"location": "Мельница", "participants": ["Рагар", "Гонец"]})

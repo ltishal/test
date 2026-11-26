@@ -1447,7 +1447,8 @@ function renderPendingCheck() {
   document.getElementById('pending-check')?.remove();
   const check = state?.pending_check;
   if (!check || draftTurn) return;
-  const label = [check.title, check.target].filter(Boolean).join(' · ');
+  const difficulty = Number.isInteger(check.dc) ? `DC ${check.dc}` : '';
+  const label = [check.title, check.target, difficulty].filter(Boolean).join(' · ');
   const notice = addMsg('system', label || 'Ожидается бросок');
   notice.id = 'pending-check';
   const button = document.createElement('button');
@@ -1455,7 +1456,20 @@ function renderPendingCheck() {
   button.textContent = '🎲 Бросить ' + check.expr;
   button.onclick = () => doRoll(check.expr);
   notice.appendChild(button);
+  if (check.kind === 'check') {
+    const cancel = document.createElement('button');
+    cancel.type = 'button';
+    cancel.className = 'btn';
+    cancel.textContent = 'Отказаться от проверки';
+    cancel.onclick = cancelPendingCheck;
+    notice.appendChild(cancel);
+  }
   scrollBottom();
+}
+
+async function cancelPendingCheck() {
+  if (busy || draftTurn || !gameAccess || state?.pending_check?.kind !== 'check') return;
+  await callAI({role: 'user', content: '/cancel-check'});
 }
 
 /* SEND */
@@ -1476,6 +1490,7 @@ async function sendMessage(text) {
 function handleCommand(cmd, arg) {
   switch(cmd) {
     case '/roll': return doRoll(arg || undefined);
+    case '/cancel-check': return cancelPendingCheck();
     case '/wait': return arg ? waitForScene(arg) : showAgenda();
     case '/sheet': return doSheet();
     case '/skills': return doSkills();
@@ -1507,7 +1522,8 @@ function showAgenda() {
   const recent = (state?.agenda || []).filter(event => event.status === 'resolved')
     .sort((a, b) => b.due - a.due).slice(0, 4);
   const rows = scheduled.map(event => '<div class="kv"><span class="k">' + esc(event.title)
-    + '</span><span class="v">' + (event.due <= time ? 'Срок наступил · ' : '') + esc(worldTime(event.due))
+    + '</span><span class="v">' + (event.due <= time ? 'Срок наступил · ' : '')
+    + (event.check_in ? 'Проверить известия · ' : '') + esc(worldTime(event.due))
     + '</span></div>').join('');
   const outcomes = recent.map(event => '<p><strong>' + esc(event.title) + '</strong> · ' + esc(event.outcome) + '</p>').join('');
   const canWait = Number.isInteger(time) && !state.pending_check && !busy && !draftTurn;
@@ -1515,7 +1531,8 @@ function showAgenda() {
     + (Number.isInteger(time) ? esc(worldTime(time)) : 'Время установится в следующей сцене.')
     + '</p><h4>Ожидаемые события</h4>' + (rows || '<p>Запланированных событий пока нет.</p>')
     + (outcomes ? '<h4>Недавние исходы</h4>' + outcomes : '')
-    + (state?.pending_check ? '<p>Сначала разрешите ожидающий бросок.</p>' : '')
+    + (state?.pending_check?.kind === 'check' ? '<p>Сначала разрешите или отмените ожидающую проверку.</p>'
+      : state?.pending_check ? '<p>Сначала разрешите ожидающий бросок.</p>' : '')
     + (canWait ? '<button type="button" class="btn" data-wait="dawn">До рассвета</button>'
       + '<button type="button" class="btn" data-wait="60">На 1 час</button>'
       + (scheduled.length ? '<button type="button" class="btn primary" data-wait="next">До ближайшего события</button>' : '') : '')
@@ -1631,6 +1648,7 @@ async function doSheet() {
         <span class="ability-name" style="color:${statusColor}">${statusIcon} ${t.icon} ${esc(q.name || '—')}</span>
       </div>
       <div style="font-size:11px;color:${statusColor};margin-bottom:4px">${offered ? 'Предложен · ' : ''}${t.label}${q.giver ? ' · от ' + esc(q.giver) : ''}${q.location ? ' · ' + esc(q.location) : ''}</div>
+      ${isCompleted ? '<div style="font-size:12px">Задание выполнено</div>' : ''}
       <div>${stages || '<div style="font-size:12px;color:var(--text-secondary);font-style:italic">— нет этапов —</div>'}</div>
       ${rewards}
       ${q.reward_condition ? `<div style="font-size:12px;margin-top:6px">
@@ -2217,6 +2235,7 @@ function doReset() {
 
 function doHelp() {
   addHtmlMsg('system', 'Команды:<br><code>/roll 1d20+3</code> — бросок<br>' +
+    '<code>/cancel-check</code> — отказаться от необязательной проверки<br>' +
     '<code>/sheet</code> — полный лист<br><code>/skills</code> — умения и навыки<br>' +
     '<code>/notes</code> — заметки, письма, документы<br>' +
     '<code>/wait</code> — время и события. <code>/wait next</code> — до ближайшего события<br>' +
@@ -2233,6 +2252,7 @@ function renderAll() {
   messages.forEach(m => {
     if (m.role === 'user') {
       if (m.roll || m.content.startsWith('[[БРОСОК]]')) showRoll(m);
+      else if (m.content === '/cancel-check') addMsg('user', 'Отказываюсь от проверки.');
       else addMsg('user', m.content.replace(/^\[\[СИСТЕМА\]\]\s*/, ''));
     } else if (m.role === 'assistant') {
       addMsg('master', m.content);

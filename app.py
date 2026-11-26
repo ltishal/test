@@ -29,13 +29,15 @@ from campaign import (
     active_check, apply_ability_event, facts_context, formula_key, merge_facts, merge_scene, notes_context,
     initial_identity, normalize_abilities, normalize_ability, pending_check, roll_result, rules_result,
     sheet_identity, campaign_minute, clock_label, update_agenda, wait_plan,
+    advance_clock, synchronize_clock, close_overdue_events, record_npc_actions,
+    CANCEL_CHECK_COMMAND, CANCEL_CHECK_REPLY, check_instructions_in_card,
 )
 
 from party_store import PartyConflict, PartyMissing, PartyStore
 from token_usage import TokenUsage, state_turn_id
 
 BASE_DIR = Path(__file__).resolve().parent
-APP_REVISION = "2026-11-26.5"
+APP_REVISION = "2026-11-26.6"
 QWEN_SUMMARY_LIMIT = 480
 QWEN_STATE_LIMIT = 1100
 QWEN_STATE_SETUP_LIMIT = 2200
@@ -564,10 +566,11 @@ LENGTH_NOTE = """
 
 
 STATE_EXTRACT_PROMPT = """
-Игровые часы. При создании верни world_minute — минута первого дня от 0 до 1439, соответствующая начальной сцене. Для прошедшего времени в обычном ходе верни elapsed: {minutes,evidence}, minutes целое 1..43200, evidence — цитата о фактически прошедшем времени. Минута мира никогда не убывает. Команду /wait сервер применяет сам. Для обещанного ответа или встречи с конкретным сроком верни schedule: [{id,title,location,in_minutes,evidence}]. Сохраняй один ID на событие; указывай срок в минутах от конца текущего хода. Когда наступившее событие действительно разрешилось в реплике, верни resolve_events: [{id,outcome,evidence}]. Отказ, подтверждение и альтернативный путь — возможные исходы. Повторное ожидание до уже прошедшего срока не создаёт ещё одно такое событие.
-Награда квеста. stages — условия завершения; reward_condition — отдельное условие выплаты из исходного предложения, если оно есть. Сохраняй его и суммы rewards при принятии и позже. При завершении условного задания или новой подтверждённой информации о награде верни reward_outcomes: [{id,outcome,evidence}], outcome — met, unmet или pending. evidence — дословная фраза о том, что условие выполнено или не выполнено. Не меняй золото, серебро, медь и XP при расчёте условной награды: сервер начисляет согласованные суммы. Если точного подтверждения нет, используй pending. Условие выплаты может остаться невыполненным, даже когда квест завершён.
+Игровые часы. При создании верни world_minute — минута первого дня 0..1439. В обычном ходе верни elapsed: {minutes,evidence}, где minutes — только новые фактически прошедшие минуты, evidence — дословная фраза из новой реплики. Если явно указан час в конце действия, верни clock_end: {evidence} с точной фразой о текущем времени или завершённом прибытии. Не бери час из обещания, прошлого или расписания. Если roll_result.check.clock_spent указан, прежняя длительность уже учтена. Если время относится к отдельному предшествующему действию, например дороге до места проверки, верни elapsed.before_check: true. Верни elapsed.additional: true только для нового, явно дополнительного интервала после броска, с цитатой именно о дополнительных минутах. При wait_plan конец ожидания определён сервером.
+События. Для новых обещанных встреч, ответов, возвращений и уже отправленных важных посыльных верни schedule: [{id,title,location,in_minutes,evidence}]. Используй стабильный id, название с именем или ролью участника, и срок от конца текущего хода. Если участник отправился или взялся ответить, а срок не назван, верни check_in: true вместо in_minutes. Сервер назначит время проверки известий. evidence — цитата о принятом поручении или состоявшейся отправке. Не записывай неподтверждённые предложения как события. Для нового конкретного исхода события верни resolve_events: [{id,outcome,evidence}], при явной досрочной отмене или прибытии добавь early: true. Не создавай повторно то же поручение, если новость лишь задержалась.
+Награда квеста. stages — условия завершения; reward_condition — отдельное условие выплаты из исходного предложения, если оно есть. Сохраняй его и суммы rewards при принятии и позже. При завершении условного задания или новой подтверждённой информации о награде верни reward_outcomes: [{id,outcome,evidence}], outcome — met, unmet или pending. evidence — дословная фраза о том, что условие выполнено или не выполнено. Не меняй золото, серебро, медь и XP при расчёте условной награды: сервер начисляет согласованные суммы. Если точного подтверждения нет, используй pending. Условие выплаты не входит в stages и не определяет status. Если цель выполнена, отметь этапы и завершение даже при outcome: unmet или pending. Оставляй pending при неопределённости, unmet только при установленном несоблюдении условия.
 
-Сохраняй канон кампании. Для новой сцены или изменений верни scene: {location,time,participants,goal,situation}. Указывай устойчивое название локации. participants — только те, кто сейчас рядом. При смене локации обнови участников, цель и обстановку сцены. Возвращай только изменения. Для подтверждённых событий, показаний, версий и владения уликами верни обновления facts: [{id,subject,detail,source,holder,status}]. Устойчивый id привязан к одному факту или предмету, сохрани его при уточнении и передаче. status: confirmed, reported, suspected или resolved. Для передачи физической улики обнови holder и inventory_remove в том же ходе. Для новой объявленной команды /roll верни pending_check: {kind,title,target,effect,ability}; kind — check, attack, save, damage, heal или initiative. effect только hero_damage для урона персонажу игрока или hero_heal для его лечения. Для урона NPC effect опусти. Формулу и DC сервер получает из реплики. Если игрок явно отменил прежнее действие и мастер подтвердил отмену, верни cancel_check: true.
+Сохраняй канон кампании. Для новой сцены или изменений верни scene: {location,time,participants,goal,situation}. Указывай устойчивое название локации. participants — только те, кто сейчас рядом. При смене локации обнови участников, цель и обстановку сцены. Возвращай только изменения. Для подтверждённых событий, показаний, версий и владения уликами верни обновления facts: [{id,subject,detail,source,holder,status}]. Устойчивый id привязан к одному факту или предмету, сохрани его при уточнении и передаче. status: confirmed, reported, suspected или resolved. Для значимого действия NPC, которое действительно произошло в новой сцене, верни npc_actions: [{id,actor,location,evidence}]. Дай одному действию устойчивый ID. evidence — дословная фраза, где рассказчик описал действие, а не слова о том, что кто-то якобы сделал. Записывай уходы, прибытия, принятые поручения и важные передачи. Показания и догадки пиши отдельно в facts. Не повторяй прежнее действие при пересказе. Для передачи физической улики обнови holder и inventory_remove в том же ходе. Для новой объявленной команды /roll верни pending_check: {kind,title,target,effect,ability}; kind — check, attack, save, damage, heal или initiative. effect только hero_damage для урона персонажу игрока или hero_heal для его лечения. Для урона NPC effect опусти. Формулу и DC сервер получает из реплики. Для ожидающей проверки верни cancel_check: {evidence}, если проверка явно отменена или прежнее действие заменено и новая реплика подтверждает, что проверка больше не нужна. Если объявлена новая проверка, верни её отдельно в pending_check.
 Для завершённого отдыха верни rest_event: {kind,evidence}, где kind — short_rest или long_rest, evidence — фраза из новой реплики о завершении отдыха. Для состоявшегося использования умения без отдельного броска верни ability_event: {name,evidence}, где name совпадает с карточкой и evidence описывает применение в этом ходе. Дыхание дракона и Второе дыхание с проверкой расходует сервер. При изменении описания существующего умения сохраняй текущие заряды.
 При покупке верни purchase: {item,quantity,currency,price,evidence}, где item — точное название, quantity — число полученных предметов, currency — gold, silver или copper, price — общая цена, evidence — цитата новой подтверждённой покупки. Для покупки используй только purchase, не возвращай отдельные изменения кошелька или инвентаря.
 
@@ -576,7 +579,7 @@ STATE_EXTRACT_PROMPT = """
 Имя, раса, класс и предыстория меняются только по событию. Поля: name, race, class, background, hp, max_hp, gold, silver, copper, stats {str,dex,con,int,wis,cha}. HP не выше max_hp. Базовые характеристики, владения, навыки и умения назначай при создании, беря их из блока [[ЛИСТ]]: строка «📊» — характеристики, «❤️» — hp, уровень, опыт и кошелёк, «🛡» — владения, «🗣» — языки, «🎯» — навыки с суммарным бонусом, «⚡» — активные умения с uses_max, uses_left и recharge (short_rest, long_rest или day), «🌀» — пассивные и постоянные эффекты с recharge passive и без uses_max, «🎒» — инвентарь. Значки и метки [[ЛИСТ]] в лист не переноси. Название умения бери из блока как есть, включая числовой эффект. Инвентарь, кошелёк и характеристики из блока переноси сразу, в том же ходе. Навык {name,bonus,source}; умение {name,description,uses_max,uses_left,recharge}. Трать применения по событию и восстанавливай по отдыху. Для Дыхания дракона спиши одно применение после разрешения урона, а не пока мастер ждёт бросок. Сохраняй полное описание эффекта при изменении только зарядов. Активное умение «без ограничений» передавай с recharge: "unlimited", без uses_max и uses_left. Пассивный эффект передавай с recharge: "passive". Не используй отрицательные заряды, Markdown и HTML-сущности в названии.
 Для передачи физической вещи из инвентаря персонажа используй item_transfers: [{id,quantity,holder,evidence}]. id — точный ID из инвентаря, holder — имя получателя, evidence — цитата о состоявшейся передаче в этой реплике. Не используй одновременно inventory_remove для той же передачи.
 Изменённую запись коллекции возвращай целиком с прежним id или именем. inventory содержит только добавленные или изменённые вещи. Для удаления верни inventory_remove: [{"name":"точное имя из листа","quantity":1}]. Удаляй за фактический расход, передачу или потерю. Для замены старого названия новым явно удали старую запись. Количество у изменённого предмета указывай итоговое. notes — содержание документов, писем, слухов и записей. Полученный физический документ также добавь в inventory, при вручении удали его из inventory. Заметка {id,type,title,content,source,date,unread}; type: note, letter, document, notification, rumor или journal.
-Квест {id,name,type,status,chain,chain_order,stages,current_stage,rewards,giver,location}; stages — объекты {text,done}; rewards — объект {xp,gold,silver,copper,items,reputation}. Записывай окончательно предложенные условия со статусом offered, принятые — active. Сохраняй id, название, этапы и награду. Отмечай каждый фактически выполненный этап по отдельности. Закрывай квест после сдачи всех обязательных этапов. Если квест официально закрыли с неполным результатом, верни failed и сохрани невыполненные пункты. Исправляй явно отменённое закрытие с прежним id.
+Квест {id,name,type,status,chain,chain_order,stages,current_stage,rewards,giver,location}; stages — объекты {text,done}; rewards — объект {xp,gold,silver,copper,items,reputation}. Записывай окончательно предложенные условия со статусом offered, принятые — active. Сохраняй id, название, этапы и награду. Отмечай каждый фактически выполненный этап по отдельности. Закрывай квест после выполнения всех оговорённых этапов, включая сдачу, только если она входила в задачу. Если квест официально закрыли с неполным результатом, верни failed и сохрани невыполненные пункты. Исправляй явно отменённое закрытие с прежним id.
 Временные поля по сцене: conditions, position, cover, weapon_in_hand, restrained, dc_modifier, dc_modifier_reasons. Отрази уже совершённое перемещение даже перед запросом броска. При смене сцены обнови cover: "нет", если герой покинул прежнее укрытие без нового. При пустых руках верни weapon_in_hand: "". Если условия прошли, верни пустой список; при отсутствии помех — 0 и []. Связи {name,attitude,note}; faction_clocks {name,progress,max,goal}. При обучении или событии в мире обновляй skills и abilities даже после создания героя.
 Повышение передавай отдельным полем level_upgrade только когда игрок явно выбрал улучшения и мастер подтвердил их в последнем ответе строкой «Повышение до уровня N:». Формат: {"level_upgrade":{"level":2,"stat":"str","ability":{"name":"Рывок","description":"...","uses_max":1,"uses_left":1,"recharge":"short_rest"},"skills":[{"name":"Атлетика","bonus":4,"source":"Воин"}]}}. Используй next_upgrade_level из листа. Для улучшения существующего умения передай его точное имя и новый максимум, сервер сохранит число потраченных зарядов. skills включай, если выбран или улучшен навык. Не дублируй бонусы повышения в других полях JSON. level_history записывает сервер.
 """
@@ -906,6 +909,11 @@ def _merge_quests(old, changes):
     seen = set()
     result = []
     for quest in merged:
+        stages = quest.get("stages")
+        if (quest.get("status") == "active" and quest.get("reward_condition")
+                and isinstance(stages, list) and stages
+                and all(isinstance(stage, dict) and stage.get("done") is True for stage in stages)):
+            quest = {**quest, "status": "completed"}
         name = _quest_name(quest)
         if name and name in seen:
             continue
@@ -1013,6 +1021,9 @@ LEVEL_UPGRADE_RE = re.compile(r"^(?:\*\*)?Повышение до уровня[ 
 
 
 def message_event_id(message, index):
+    event_id = message.get("event_id")
+    if isinstance(event_id, str) and re.fullmatch(r"[a-f0-9]{64}", event_id):
+        return event_id
     raw = f"{index}\0{message.get('role','')}\0{message.get('content','')}"
     return hashlib.sha256(raw.encode("utf-8", errors="replace")).hexdigest()
 
@@ -1208,6 +1219,11 @@ def _apply_level_upgrade(state, upgrade, next_level):
     return True
 
 
+def _recent_event_outcomes(state):
+    return [event for event in (state.get("agenda") or [])
+            if isinstance(event, dict) and event.get("status") == "resolved"][-4:]
+
+
 def _grounded_event(evidence, latest):
     if not isinstance(evidence, str):
         return False
@@ -1291,6 +1307,13 @@ def extract_state(messages, current_state, turn_id=None, result=None):
     current = dict(DEFAULT_STATE)
     if isinstance(current_state, dict):
         current.update(current_state)
+    if (len(messages) >= 2 and messages[-2].get("role") == "user"
+            and messages[-2].get("content") == CANCEL_CHECK_COMMAND
+            and messages[-1].get("content") == CANCEL_CHECK_REPLY):
+        check = active_check(current, messages[:-2])
+        if not check or check.get("kind") != "check":
+            raise ValueError("Нет необязательной проверки для отмены.")
+        return {**current, "pending_check": None}
     current["abilities"] = normalize_abilities(current.get("abilities"))
     next_upgrade_level = _next_upgrade_level(current)
     last_index = len(messages) - 1
@@ -1338,8 +1361,10 @@ def extract_state(messages, current_state, turn_id=None, result=None):
                    if key not in {"xp_event_ids", "quest_xp_awards", "quest_xp_paid_ids",
                                   "last_state_event_id", "level_history"}}
     model_state["facts"] = facts_context(current.get("facts"), action + " " + latest)
-    model_state["agenda"] = [event for event in (current.get("agenda") or [])
-                             if isinstance(event, dict) and event.get("status") == "scheduled"][:12]
+    active_events = [event for event in (current.get("agenda") or [])
+                     if isinstance(event, dict) and event.get("status") == "scheduled"]
+    model_state["agenda"] = active_events[:12]
+    model_state["recent_event_outcomes"] = _recent_event_outcomes(current)
     plan = wait_plan(current, action)
     if plan:
         model_state["wait_plan"] = plan
@@ -1411,10 +1436,17 @@ def extract_state(messages, current_state, turn_id=None, result=None):
     previous_minute = campaign_minute(current)
     proposed_minute = new_state.pop("world_minute", None)
     elapsed = new_state.pop("elapsed", None)
+    clock_end = new_state.pop("clock_end", None)
     scheduled = new_state.pop("schedule", None)
     resolved_events = new_state.pop("resolve_events", None)
     reward_outcomes = new_state.pop("reward_outcomes", None)
     campaign_scene = merge_scene(current.get("scene"), new_state.pop("scene", None))
+    campaign_scene = dict(campaign_scene)
+    history = messages[:max(0, last_index - 1)]
+    previous_check = active_check(current, history)
+    resolved_id = (result.get("check") or {}).get("id") if result else None
+    resolved_previous = previous_check and resolved_id == previous_check.get("id")
+    grounded = lambda evidence: _grounded_event(evidence, latest)
     minute = previous_minute
     if minute is None:
         minute = (proposed_minute if type(proposed_minute) is int and 0 <= proposed_minute < 1440
@@ -1423,33 +1455,39 @@ def extract_state(messages, current_state, turn_id=None, result=None):
             minute = 480
     elif plan:
         minute = plan["until"]
-    elif isinstance(elapsed, dict) and _grounded_event(elapsed.get("evidence"), latest):
-        duration = elapsed.get("minutes")
-        if type(duration) is int and 1 <= duration <= 43200:
-            minute += duration
+    else:
+        minute = advance_clock(minute, latest, elapsed, clock_end, previous_check, resolved_previous, grounded)
     if minute is not None:
         new_state["world_minute"] = minute
         campaign_scene["time"] = clock_label(minute)
-        new_state["agenda"] = update_agenda(current, scheduled, resolved_events, minute,
-                                            lambda evidence: _grounded_event(evidence, latest))
+        new_state["agenda"] = update_agenda(current, scheduled, resolved_events, minute, grounded)
+        close_overdue_events(new_state["agenda"], minute)
     else:
         new_state.pop("agenda", None)
     campaign_facts = merge_facts(current.get("facts"), new_state.pop("facts", None))
+    campaign_facts = record_npc_actions(campaign_facts, new_state.pop("npc_actions", None),
+                                        campaign_scene, minute, grounded)
     proposed = new_state.pop("pending_check", None)
-    cancel_check = new_state.pop("cancel_check", None) is True
-    action_index = last_index - 1
-    history = messages[:max(0, action_index)]
-    previous_check = active_check(current, history)
+    cancellation = new_state.pop("cancel_check", None)
+    cancel_check = (isinstance(cancellation, dict) and grounded(cancellation.get("evidence")))
     next_check = pending_check(latest, proposed, campaign_scene)
-    if next_check and last_event_id:
-        next_check["id"] = last_event_id[:32]
-    if not cancel_check and previous_check and not result:
-        # An unrelated answer may restate the same check. Keep its ID and formula.
-        if not next_check or next_check["scene_id"] == previous_check.get("scene_id"):
-            next_check = previous_check
     previous_scene = current.get("scene")
-    if (isinstance(previous_scene, dict) and previous_scene.get("location")
-            and campaign_scene.get("location") != previous_scene["location"]):
+    previous_location = previous_scene.get("location") if isinstance(previous_scene, dict) else None
+    moved = bool(previous_location and previous_location != campaign_scene.get("location"))
+    if previous_check and not resolved_previous:
+        optional = previous_check.get("kind") == "check"
+        replacement = next_check and isinstance(proposed, dict) and any(
+            next_check.get(key) != previous_check.get(key) for key in ("kind", "title", "target", "expr", "dc")
+        )
+        if not optional or not (moved or cancel_check or replacement):
+            next_check = previous_check
+    if next_check and next_check is not previous_check:
+        if last_event_id:
+            next_check["id"] = last_event_id[:32]
+        time_before_check = isinstance(elapsed, dict) and elapsed.get("before_check") is True
+        if not plan and not time_before_check and previous_minute is not None and minute > previous_minute:
+            next_check["clock_spent"] = minute - previous_minute
+    if moved:
         new_state.setdefault("position", "стоит")
         new_state.setdefault("cover", "нет")
     new_state["scene"] = campaign_scene
@@ -1986,6 +2024,19 @@ def api_chat():
             message for message in messages if message.get("role") != "system"
         ]
     check = active_check(game_state, history)
+    if action.get("content") == CANCEL_CHECK_COMMAND:
+        if not check or check.get("kind") != "check":
+            return jsonify({"error": "Нет необязательной проверки для отмены.", "code": "action_invalid"}), 400
+        if party:
+            try:
+                PARTIES.stage(owner, party["id"], party["revision"], request_id, action,
+                              {"role": "assistant", "content": CANCEL_CHECK_REPLY})
+            except PartyConflict as exc:
+                return _party_conflict(exc)
+            except sqlite3.Error as exc:
+                return _party_storage_failure(exc)
+        return Response(CANCEL_CHECK_REPLY + TURN_COMPLETE, mimetype="text/plain; charset=utf-8",
+                        headers={"Cache-Control": "no-store", "X-Turn-Id": request_id or uuid4().hex})
     try:
         result = _signed_roll(action, game_state, history, party=party)
     except ValueError as exc:
@@ -2004,11 +2055,16 @@ def api_chat():
         return jsonify({"error": str(exc), "code": "action_invalid"}), 400
     minute = campaign_minute(game_state)
     if minute is not None:
-        state_context["world_clock"] = {"minute": minute, "label": clock_label(minute)}
+        state_context["world_clock"] = {"start_minute": minute, "start_label": clock_label(minute)}
+        if plan:
+            state_context["world_clock"].update(end_minute=plan["until"], end_label=plan["label"])
     agenda = [event for event in (game_state.get("agenda") or [])
               if isinstance(event, dict) and event.get("status") == "scheduled"]
     if agenda:
         state_context["agenda"] = agenda[:12]
+    event_outcomes = _recent_event_outcomes(game_state)
+    if event_outcomes:
+        state_context["recent_event_outcomes"] = event_outcomes
     if plan:
         state_context["wait_plan"] = plan
     scene = game_state.get("scene")
@@ -2075,12 +2131,18 @@ def api_chat():
     turn_rule = ("Используй roll_result как окончательный результат именно указанной проверки. "
                  "Если указан rule_effect, используй рассчитанный HP и не применяй изменение повторно. "
                  "Свободный бросок без check не разрешает действие. При pending_check сохраняй "
-                 "ожидание, пока игрок не бросит или явно не отменит действие. "
-                 "scene — актуальная локация и участники, facts и journal — канон с источниками. "
-                 "world_clock — текущее время, оно не идёт назад. wait_plan фиксирует конец ожидания. "
-                 "В том же ответе дай конкретный исход по каждому наступившему событию из wait_plan.due; "
-                 "ответ, отказ или новый проверяемый путь. Если событий нет, опиши итог к указанному часу. "
-                 "Для обычного ожидания называй сколько прошло времени. Обещанному событию назначай достижимый срок. "
+                 "ожидание, пока действие имеет смысл. Если игрок достиг цели другим способом или ушёл, "
+                 "явно скажи, что прежняя необязательная проверка снята. Объявляй каждую формулу /roll один раз. "
+                 "scene — текущая сцена. Подтверждённые npc_action в facts — произошедшие действия. "
+                 "Слова персонажей и догадки не меняют эти факты, даже если говорящий отрицает своё действие. "
+                 "world_clock.start_label — время до хода. Для ожидания бери итог только из world_clock.end_label; "
+                 "не называй исходное время текущим. Для обычного хода называй только новые фактически прошедшие минуты. "
+                 "Если roll_result.check.clock_spent задан, время начала проверки уже списано. "
+                 "Если результат запускает новый интервал, назови его дополнительным и объясни, на что он ушёл. "
+                 "Дай конкретный исход по каждому наступившему событию, особенно из wait_plan.due. "
+                 "При check_in отсутствие вестей допустимо, но назови новый проверяемый путь. "
+                 "Обещанному событию назначай срок проверки, если можешь; не обещай заведомо неизвестное прибытие. "
+                 "Не отправляй игрока снова проверять уже проверенное место без нового повода. "
                  "Если reward_condition задано, разделяй завершение и право на оплату: сообщи, исполнено ли условие, "
                  "а подтверждение фактической выплаты оставь серверу. Не добавляй XP или монеты по такому квесту.")
     length_note = "" if setup_turn else "\n\n" + turn_rule + "\n\n" + LENGTH_NOTE
@@ -2307,11 +2369,19 @@ def _commit_party_turn(data):
     old_minute, new_minute = campaign_minute(state), campaign_minute(updated)
     if old_minute is not None and new_minute is not None and old_minute < new_minute:
         details.append(clock_label(new_minute))
+    if new_minute is not None and state.get("race") and state.get("class"):
+        reply["content"] = synchronize_clock(reply["content"], new_minute)
+    next_check = updated.get("pending_check")
+    prior_check = active_check(state, party["messages"])
+    if next_check and next_check.get("id") != (prior_check or {}).get("id"):
+        reply["content"] = check_instructions_in_card(reply["content"], next_check)
+    if reply["content"] != draft["reply"]["content"]:
+        reply["event_id"] = message_event_id(draft["reply"], len(history) - 1)
+    previous_events = {event.get("id") for event in (state.get("agenda") or [])
+                       if isinstance(event, dict) and event.get("status") == "resolved"}
     for event in updated.get("agenda") or []:
-        if (isinstance(event, dict) and event.get("status") == "scheduled" and new_minute is not None
-                and type(event.get("due")) is int and event["due"] <= new_minute
-                and (old_minute is None or event["due"] > old_minute)):
-            details.append(f"Срок наступил: {event['title']}. Исход ещё не записан")
+        if isinstance(event, dict) and event.get("no_report") and event.get("id") not in previous_events:
+            details.append(f"{event['title']}: {event['outcome']}")
     if details and state.get("race") and state.get("class") and not state.get("character_setup_pending"):
         reply["resolution"] = " · ".join(details)
     saved = PARTIES.commit(owner, party_id, revision, request_id, updated, reply)

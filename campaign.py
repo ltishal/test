@@ -13,6 +13,21 @@ SCENE_FIELDS = ("id", "location", "time", "participants", "goal", "situation")
 FACT_FIELDS = ("id", "subject", "detail", "source", "holder", "status")
 FACT_STATUSES = {"confirmed", "reported", "suspected", "resolved"}
 IDENTITY_FIELDS = ("name", "race", "class", "background")
+CANCEL_CHECK_COMMAND = "/cancel-check"
+CANCEL_CHECK_REPLY = "Проверка отменена. Выберите следующее действие."
+CHECK_IN_MINUTES = 30
+CLOCK_VALUE = r"(?:(?:День\s+(?P<day>\d{1,5}),?\s*)?)(?P<hour>[01]?\d|2[0-3]):(?P<minute>[0-5]\d)"
+CLOCK_RE = re.compile(r"(?<!\d)" + CLOCK_VALUE + r"(?!\d)", re.I)
+CURRENT_CLOCK_RE = re.compile(
+    r"(?P<label>\b(?:(?:сейчас|теперь|время теперь|текущее время)\s*(?:[—–:=]\s*)?"
+    r"|время\s*[—–:=]\s*)(?:\*\*)?)"
+    + CLOCK_VALUE + r"(?!\d)", re.I,
+)
+COMPLETED_ARRIVAL_RE = re.compile(
+    r"\b[Кк]\s+" + CLOCK_VALUE + r"(?!\d)\s+(?=[^.\n]{0,90}\b"
+    r"(?:добрал\w*|добира\w*|вернул\w*|верну[влш]\w*|вновь|снова|прибыл\w*|приш[ёллаи]+)\b)",
+    re.I,
+)
 
 
 def sheet_identity(reply):
@@ -75,7 +90,19 @@ def pending_check(reply, proposed=None, scene=None):
     if not isinstance(reply, str):
         return None
     commands = list(ROLL_COMMAND.finditer(reply))
-    if len(commands) != 1:
+    if not commands:
+        return None
+    formulas = {formula_key(match[1]) for match in commands}
+    if None in formulas or len(formulas) != 1:
+        return None
+    difficulties = set()
+    preceding = 0
+    for match in commands:
+        targets = list(DIFFICULTY.finditer(reply[max(preceding, match.start() - 470):match.start()].replace("*", "")))
+        if targets:
+            difficulties.add(int(targets[-1][1]))
+        preceding = match.end()
+    if len(difficulties) > 1:
         return None
     command = commands[0]
     formula = command[1].lower()
@@ -83,7 +110,7 @@ def pending_check(reply, proposed=None, scene=None):
         return None
     nearby = reply[max(0, command.start() - 470):command.start()].replace("*", "")
     targets = list(DIFFICULTY.finditer(nearby))
-    dc = int(targets[-1][1]) if targets else None
+    dc = next(iter(difficulties), None)
     suggested = proposed if isinstance(proposed, dict) else {}
     title = _text(suggested.get("title"))
     kind = suggested.get("kind")
@@ -137,6 +164,19 @@ def pending_check(reply, proposed=None, scene=None):
         "effect": effect if (kind, effect) in (("damage", "hero_damage"), ("heal", "hero_heal")) else "",
         "ability": ability,
     }
+
+
+def check_instructions_in_card(reply, check):
+    """Show an announced formula in its check card and keep other commands in prose."""
+    commands = list(ROLL_COMMAND.finditer(reply))
+    if not commands or any(formula_key(match[1]) != formula_key(check["expr"]) for match in commands):
+        return reply
+    return re.sub(
+        r"(?:\*\*|\x60)*(?:команда\s*:\s*)?(?:\*\*|\x60)*"
+        + ROLL_COMMAND.pattern + r"(?:\*\*|\x60)*(?:\.(?:\*\*|\x60)*)?",
+        lambda match: "\n\n" if match.end() < len(reply) and reply[match.end()].isupper() else "",
+        reply, flags=re.I,
+    ).strip()
 
 
 def active_check(state, messages):
@@ -226,7 +266,7 @@ def merge_facts(previous, updates):
         if not isinstance(patch, dict):
             continue
         key = _text(patch.get("id"), 90).casefold()
-        if not key:
+        if not key or key.startswith("npc-action:"):
             continue
         entry = dict(facts.pop(key, {}))
         entry.update({field: _text(patch[field], 340) for field in FACT_FIELDS if isinstance(patch.get(field), str)})
@@ -236,6 +276,27 @@ def merge_facts(previous, updates):
         if entry.get("subject") and entry.get("detail"):
             facts[key] = entry
     return list(facts.values())
+
+
+def record_npc_actions(facts, patches, scene, minute, grounded):
+    records = list(facts)
+    known = {fact["id"] for fact in facts if isinstance(fact.get("id"), str)}
+    for patch in patches[:8] if isinstance(patches, list) else []:
+        if not isinstance(patch, dict) or not grounded(patch.get("evidence")):
+            continue
+        actor = _text(patch.get("actor"), 100)
+        event = _text(patch.get("id"), 75).casefold()
+        key = "npc-action:" + event
+        if not actor or not event or key in known:
+            continue
+        records.append({
+            "id": key, "kind": "npc_action", "subject": actor,
+            "detail": _text(patch["evidence"], 340), "status": "confirmed",
+            "location": _text(patch.get("location") or scene.get("location"), 160),
+            "minute": minute,
+        })
+        known.add(key)
+    return records
 
 
 def notes_context(notes, query):
@@ -257,11 +318,16 @@ def notes_context(notes, query):
 def facts_context(facts, query):
     if not isinstance(facts, list):
         return []
-    words = set(re.findall(r"\w{4,}", query.casefold()))
+    words = {word[:5] for word in re.findall(r"\w{4,}", query.casefold())}
     entries = [entry for entry in reversed(facts) if isinstance(entry, dict)]
-    return sorted(entries, key=lambda entry: -len(words.intersection(
-        re.findall(r"\w{4,}", " ".join(str(value) for value in entry.values()).casefold())
-    )))[:12]
+    def relevance(entry):
+        values = " ".join(str(entry.get(key, "")) for key in ("subject", "detail", "location", "holder"))
+        matches = words.intersection(word[:5] for word in re.findall(r"\w{4,}", values.casefold()))
+        return len(matches)
+
+    ranked = sorted(entries, key=relevance, reverse=True)
+    actions = [entry for entry in ranked if entry.get("kind") == "npc_action"][:4]
+    return actions + [entry for entry in ranked if entry not in actions][:12 - len(actions)]
 
 
 def clean_ability_name(name):
@@ -347,6 +413,9 @@ def campaign_minute(state):
         return minute
     scene = state.get("scene")
     label = (scene.get("time") or "").casefold() if isinstance(scene, dict) and isinstance(scene.get("time"), str) else ""
+    stated = CLOCK_RE.fullmatch(label.strip())
+    if stated:
+        return (max(1, int(stated["day"] or 1)) - 1) * 1440 + int(stated["hour"]) * 60 + int(stated["minute"])
     for word, minute in (("рассвет", 360), ("утр", 540), ("полд", 720),
                          ("сумерк", 1140), ("вечер", 1140), ("ноч", 1320), ("день", 960)):
         if word in label:
@@ -360,6 +429,44 @@ def clock_label(minute):
     return f"День {day + 1}, {hour:02d}:{minute:02d}"
 
 
+def advance_clock(start, reply, elapsed, end, previous_check, resolving, grounded):
+    if (resolving and previous_check and previous_check.get("clock_spent")
+            and not (isinstance(elapsed, dict) and elapsed.get("additional") is True
+                     and grounded(elapsed.get("evidence"))
+                     and re.search(r"\b(?:ещ[её]|дополнительно)\b", elapsed["evidence"], re.I))):
+        return start
+    anchor = None
+    if isinstance(end, dict) and grounded(end.get("evidence")):
+        clocks = list(CLOCK_RE.finditer(end["evidence"]))
+        if len(clocks) == 1:
+            anchor = clocks[0]
+    if anchor is None:
+        anchors = list(CURRENT_CLOCK_RE.finditer(reply)) + list(COMPLETED_ARRIVAL_RE.finditer(reply))
+        if anchors:
+            anchor = max(anchors, key=lambda match: match.start())
+    if anchor:
+        minute_of_day = int(anchor["hour"]) * 60 + int(anchor["minute"])
+        day = int(anchor["day"]) - 1 if anchor["day"] else start // 1440
+        target = day * 1440 + minute_of_day
+        if not anchor["day"] and start - target > 720:
+            target += 1440
+        if start <= target <= start + 43200:
+            return target
+    if isinstance(elapsed, dict) and grounded(elapsed.get("evidence")):
+        duration = elapsed.get("minutes")
+        if type(duration) is int and 1 <= duration <= 43200:
+            return start + duration
+    return start
+
+
+def synchronize_clock(reply, minute):
+    """Replace a reported current clock reading with the committed time."""
+    label = clock_label(minute)
+    return CURRENT_CLOCK_RE.sub(lambda match: match["label"] + (
+        label if match["day"] else label.rsplit(" ", 1)[1]
+    ), reply)
+
+
 def update_agenda(state, patches, resolutions, minute, grounded):
     stored = state.get("agenda")
     events = {event["id"]: dict(event) for event in stored
@@ -370,18 +477,37 @@ def update_agenda(state, patches, resolutions, minute, grounded):
         key = _text(patch.get("id"), 100).casefold()
         title = _text(patch.get("title"), 160)
         delay = patch.get("in_minutes")
-        if not key or key in events or not title or type(delay) is not int or not 1 <= delay <= 10080:
+        if not key or key in events or not title:
+            continue
+        check_in = delay is None and patch.get("check_in") is True
+        if check_in:
+            delay = CHECK_IN_MINUTES
+        if type(delay) is not int or not 1 <= delay <= 10080:
             continue
         events[key] = {"id": key, "title": title, "location": _text(patch.get("location"), 160),
                        "due": minute + delay, "status": "scheduled"}
+        if check_in:
+            events[key]["check_in"] = True
     for patch in resolutions if isinstance(resolutions, list) else []:
         if not isinstance(patch, dict) or not grounded(patch.get("evidence")):
             continue
         event = events.get(_text(patch.get("id"), 100).casefold())
         outcome = _text(patch.get("outcome"), 300)
-        if event and event["status"] == "scheduled" and event["due"] <= minute and outcome:
+        if (event and (event["status"] == "scheduled" or event.get("no_report")) and outcome
+                and (event["due"] <= minute or event.get("check_in") or patch.get("early") is True)):
             event.update(status="resolved", outcome=outcome)
+            event.pop("no_report", None)
     return sorted(events.values(), key=lambda event: event["due"])
+
+
+def close_overdue_events(events, minute):
+    for event in events:
+        if event["status"] != "scheduled" or event["due"] > minute:
+            continue
+        location = event.get("location")
+        follow_up = (f"Проверьте у участников события на месте ({location})." if location
+                     else "Уточните исход у того, кто обещал сообщить результат.")
+        event.update(status="resolved", outcome="К сроку подтверждения нет. " + follow_up, no_report=True)
 
 
 def wait_plan(state, action):
