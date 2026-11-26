@@ -25,7 +25,7 @@ from openai import OpenAI
 from token_usage import TokenUsage, state_turn_id
 
 BASE_DIR = Path(__file__).resolve().parent
-APP_REVISION = "2026-11-25.17"
+APP_REVISION = "2026-11-25.18"
 QWEN_SUMMARY_LIMIT = 480
 QWEN_STATE_LIMIT = 1100
 QWEN_STATE_SETUP_LIMIT = 2200
@@ -94,6 +94,17 @@ client = OpenAI(api_key=API_KEY, base_url=BASE_URL, **client_options)
 EXTRACT_MODEL = _model_id((os.getenv("EXTRACT_MODEL") or "").strip() or MODEL)
 SUMMARY_MODEL = _model_id((os.getenv("SUMMARY_MODEL") or "").strip() or MODEL)
 
+# ─── Длина ответа мастера и бюджет хода ───────────────────────────────────
+# Эти константы объявлены до первого print(): модуль выполняется сверху вниз,
+# и обращение к ним выше определения роняло воркер с NameError.
+# Ориентир: ~7000 токенов на ход (ответ мастера + обновление листа + свёртка).
+# presence_penalty снят: он подталкивал модель к раннему завершению ответа.
+FREQ_PENALTY = float(os.getenv("OPENAI_FREQ_PENALTY", "0.15"))
+PRES_PENALTY = float(os.getenv("OPENAI_PRES_PENALTY", "0.0"))
+NARRATION_MAX_TOKENS = max(256, int(os.getenv("NARRATION_MAX_TOKENS", "900")))
+# Необязательно: "none" или "low" — если модель тратит вывод на скрытые рассуждения.
+CHAT_REASONING_EFFORT = (os.getenv("CHAT_REASONING_EFFORT") or "").strip()
+
 print(
     f"[boot] app_revision={APP_REVISION} | env={_ENV_FILE.name if _ENV_FILE else 'нет (только переменные окружения)'} | "
     f"provider={PROVIDER} | model={MODEL} | base_url={BASE_URL or 'https://api.openai.com/v1'} | "
@@ -129,15 +140,6 @@ def _saves_dir():
 SAVES_DIR = _saves_dir()
 TOKEN_USAGE = TokenUsage(SAVES_DIR / "token_usage.sqlite3")
 app.add_url_rule("/admin/tokens", view_func=TOKEN_USAGE.dashboard)
-
-# ─── Длина ответа мастера и бюджет хода ───────────────────────────────────
-# Ориентир: ~7000 токенов на ход (ответ мастера + обновление листа + свёртка).
-# presence_penalty снят: он подталкивал модель к раннему завершению ответа.
-FREQ_PENALTY = float(os.getenv("OPENAI_FREQ_PENALTY", "0.15"))
-PRES_PENALTY = float(os.getenv("OPENAI_PRES_PENALTY", "0.0"))
-NARRATION_MAX_TOKENS = max(256, int(os.getenv("NARRATION_MAX_TOKENS", "900")))
-# Необязательно: "none" или "low" — если модель тратит вывод на скрытые рассуждения.
-CHAT_REASONING_EFFORT = (os.getenv("CHAT_REASONING_EFFORT") or "").strip()
 
 # ─── Лимит параллельных обращений к модели ────────────────────────────────
 # Живёт в памяти процесса: держите РОВНО ОДИН воркер gunicorn,
